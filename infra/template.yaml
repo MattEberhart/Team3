@@ -36,6 +36,9 @@ Globals:
         MEDIA_BUCKET: !Ref MediaBucket
         OPENAI_SECRET_ARN: !Ref OpenAISecret
         OPENAI_MODEL: !Ref OpenAIModel
+        LANGSMITH_SECRET_ARN: !Ref LangSmithSecret
+        LANGSMITH_TRACING: 'true'
+        LANGSMITH_PROJECT: !Sub second-serving-${Environment}
 
 Resources:
   UserPool:
@@ -112,7 +115,9 @@ Resources:
         - Statement:
             Effect: Allow
             Action: secretsmanager:GetSecretValue
-            Resource: !Ref OpenAISecret
+            Resource:
+              - !Ref OpenAISecret
+              - !Ref LangSmithSecret
       Events:
         Health:
           Type: HttpApi
@@ -310,6 +315,15 @@ Resources:
       Description: OpenAI API key; populate the apiKey field after deployment.
       SecretString: '{"apiKey":"SET_IN_AWS_CONSOLE"}'
 
+  LangSmithSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub /second-serving/${Environment}/langsmith
+      Description: LangSmith API key for agent tracing; populate the apiKey field after deployment.
+      SecretString: '{"apiKey":"SET_IN_AWS_CONSOLE"}'
+
   AmplifyApp:
     Type: AWS::Amplify::App
     Properties:
@@ -363,6 +377,8 @@ Outputs:
     Value: !Ref MediaBucket
   OpenAISecretArn:
     Value: !Ref OpenAISecret
+  LangSmithSecretArn:
+    Value: !Ref LangSmithSecret
   AmplifyAppId:
     Value: !GetAtt AmplifyApp.AppId
   AmplifyDefaultDomain:

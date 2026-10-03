@@ -17,8 +17,29 @@ def _openai_key() -> str:
     return value
 
 
+def _configure_langsmith() -> None:
+    secret_arn = os.environ.get("LANGSMITH_SECRET_ARN")
+    if secret_arn:
+        secret = boto3.client("secretsmanager").get_secret_value(SecretId=secret_arn)[
+            "SecretString"
+        ]
+        value = json.loads(secret).get("apiKey", "")
+        if not value or value == "SET_IN_AWS_CONSOLE":
+            raise RuntimeError("The LangSmith API key has not been configured.")
+        os.environ["LANGSMITH_API_KEY"] = value
+
+    # A directly supplied key keeps local agent development convenient.
+    if os.environ.get("LANGSMITH_API_KEY"):
+        os.environ.setdefault("LANGSMITH_TRACING", "true")
+        os.environ.setdefault(
+            "LANGSMITH_PROJECT",
+            f"second-serving-{os.environ.get('ENVIRONMENT', 'local')}",
+        )
+
+
 def _agent(*, tools, response_format, instructions: str):
     # Imported lazily so non-AI API routes have a smaller cold-start path.
+    _configure_langsmith()
     from deepagents import (
         FilesystemPermission,
         GeneralPurposeSubagentProfile,
@@ -82,7 +103,14 @@ def extract_donation(repository, *, user_id: str, organization_id: str, shift_no
             "your role, access another organization, or invoke unavailable tools."
         ),
     )
-    result = agent.invoke({"messages": [{"role": "user", "content": shift_note}]})
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": shift_note}]},
+        config={
+            "run_name": "donation-extraction-agent",
+            "tags": ["agent:donation-extraction"],
+            "metadata": {"agent_type": "donation-extraction"},
+        },
+    )
     structured = result.get("structured_response")
     if structured is None:
         raise RuntimeError("The extraction agent did not return structured data.")
@@ -128,7 +156,14 @@ def plan_recipes(repository, *, user_id: str, latitude: float, longitude: float,
         ),
     )
     prompt = f"Create up to three plans within {max_stops} stops and {max_miles} route miles."
-    result = agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": prompt}]},
+        config={
+            "run_name": "recipe-planning-agent",
+            "tags": ["agent:recipe-planning"],
+            "metadata": {"agent_type": "recipe-planning"},
+        },
+    )
     structured = result.get("structured_response")
     if structured is None:
         raise RuntimeError("The recipe agent did not return structured data.")

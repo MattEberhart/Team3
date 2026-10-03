@@ -39,7 +39,7 @@ The development environment starts without seeded food or manufactured activity.
 - Python 3.12 Lambda API
 - DynamoDB on-demand tables for users, organizations, memberships, listings, reservations, and short-lived agent drafts
 - Private S3 bucket with presigned uploads for photos and temporary voice clips
-- OpenAI through LangChain Deep Agents; the API key lives in AWS Secrets Manager
+- OpenAI through LangChain Deep Agents, with LangSmith tracing; both API keys live in AWS Secrets Manager
 - AWS SAM/CloudFormation for repeatable infrastructure
 
 ```text
@@ -79,7 +79,7 @@ The model has no raw database or AWS tool. Its tools are narrow, request-scoped 
 - Route constraints are recomputed by application code after model output; plans outside the stop or mileage limit are discarded.
 - Allergens, quantities, storage rules, and pickup times are never supposed to be invented. Missing values are flagged for review.
 
-The OpenAI key is fetched by Lambda from Secrets Manager and is never compiled into the frontend or committed to Git.
+The OpenAI and LangSmith keys are fetched by Lambda from Secrets Manager and are never compiled into the frontend or committed to Git. Agent runs are traced to the environment-specific LangSmith project `second-serving-<environment>` and labeled by agent type.
 
 ## Live development environment
 
@@ -149,12 +149,12 @@ sam deploy --config-file infra/samconfig.toml --guided
 
 After deployment:
 
-1. Open AWS Secrets Manager and replace the `apiKey` placeholder in `/second-serving/dev/openai`.
+1. Open AWS Secrets Manager and replace the `apiKey` placeholders in `/second-serving/dev/openai` and `/second-serving/dev/langsmith`.
 2. Read the stack outputs for the API URL, Cognito IDs, and Amplify app ID.
 3. Set those three `NEXT_PUBLIC_*` values locally and rebuild `out/`, or connect the Amplify app to this repository and enable automatic builds.
 4. Update the stack's `FrontendOrigin` and `SiteUrl` parameters to the final Amplify origin so CORS and social metadata use the deployed site.
 
-The CloudFormation template retains DynamoDB tables, the media bucket, Cognito pool, and OpenAI secret when the stack is deleted. That protects hackathon data but means cleanup is intentionally a separate, explicit step.
+The CloudFormation template retains DynamoDB tables, the media bucket, Cognito pool, and API-key secrets when the stack is deleted. That protects hackathon data but means cleanup is intentionally a separate, explicit step.
 
 ### OpenAI secret format
 
@@ -165,6 +165,18 @@ Set `/second-serving/dev/openai` in AWS Secrets Manager to a JSON value with thi
 ```
 
 Never commit the actual value. Lambda reads the secret at request time, so changing it does not require another frontend build.
+
+### LangSmith tracing
+
+Set `/second-serving/dev/langsmith` in AWS Secrets Manager to a JSON value with this shape:
+
+```json
+{"apiKey":"YOUR_LANGSMITH_API_KEY"}
+```
+
+The Lambda enables LangSmith tracing automatically and sends both agents to the `second-serving-dev` project. Donation extraction and recipe planning runs have distinct names, tags, and `agent_type` metadata so they can be filtered in LangSmith. For local backend development, set `LANGSMITH_API_KEY` directly; tracing and the `second-serving-local` project name are then enabled automatically.
+
+Traces include model and tool inputs and outputs. Treat the LangSmith workspace as application data infrastructure and configure its access and retention accordingly.
 
 ## Main API routes
 
