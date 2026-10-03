@@ -1,4 +1,3 @@
-import json
 import os
 import secrets
 import time
@@ -198,7 +197,13 @@ class Repository:
 
     @staticmethod
     def _ddb_safe(value):
-        return json.loads(json.dumps(value), parse_float=Decimal)
+        if isinstance(value, float):
+            return Decimal(str(value))
+        if isinstance(value, list):
+            return [Repository._ddb_safe(item) for item in value]
+        if isinstance(value, dict):
+            return {key: Repository._ddb_safe(item) for key, item in value.items()}
+        return value
 
     @staticmethod
     def _serialize(value):
