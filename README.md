@@ -102,6 +102,8 @@ The development database includes six clearly labeled demo listings for the hack
 
 Reservations use one DynamoDB transaction: a conditional inventory decrement and reservation insert either both succeed or both fail. This prevents two recipients from claiming the same final quantity.
 
+The transaction path uses DynamoDB's low-level client and explicit `AttributeValue` serialization. Resource-style clients must not be substituted there because doing so would serialize transaction keys twice.
+
 ## Local frontend
 
 ```bash

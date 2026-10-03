@@ -27,7 +27,10 @@ def json_safe(value):
 class Repository:
     def __init__(self):
         resource = boto3.resource("dynamodb")
-        self.client = resource.meta.client
+        # Transactions use DynamoDB's low-level AttributeValue format below.
+        # Keep this separate from the resource client, which would serialize
+        # those values a second time (for example, S -> M) and cancel writes.
+        self.client = boto3.client("dynamodb")
         self.users = resource.Table(os.environ["USERS_TABLE"])
         self.organizations = resource.Table(os.environ["ORGANIZATIONS_TABLE"])
         self.memberships = resource.Table(os.environ["MEMBERSHIPS_TABLE"])

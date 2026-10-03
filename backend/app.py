@@ -127,9 +127,12 @@ def handler(event, _context):
     except (ValueError, json.JSONDecodeError) as error:
         return response(400, {"error": str(error)})
     except ClientError as error:
-        if error.response.get("Error", {}).get("Code") in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
+        error_code = error.response.get("Error", {}).get("Code")
+        if route_key == "POST /reservations" and error_code in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
             return response(409, {"error": "That quantity is no longer available."})
-        print(json.dumps({"event": "aws_error", "code": error.response.get("Error", {}).get("Code")}))
+        if route_key == "POST /me/bootstrap" and error_code in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
+            return response(409, {"error": "We could not finish setting up this profile. Please sign out, sign back in, and try again."})
+        print(json.dumps({"event": "aws_error", "code": error_code}))
         return response(500, {"error": "A service error occurred."})
     except Exception as error:
         print(json.dumps({"event": "unhandled_error", "type": type(error).__name__}))
