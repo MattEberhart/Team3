@@ -3,7 +3,7 @@
 :root { --ink:#233027; --muted:#687269; --cream:#f5f1e8; --paper:#fbfaf6; --green:#1f4b37; --lime:#d7ec84; --line:#dcd9cf; }
 * { box-sizing:border-box; }
 html { scroll-behavior:smooth; }
-body { margin:0; background:var(--paper); color:var(--ink); font-family:var(--font-geist-sans),Arial,sans-serif; }
+body { margin:0; background:var(--paper); color:var(--ink); font-family:Arial,Helvetica,sans-serif; }
 button,a { font:inherit; }
 button { color:inherit; }
 a { color:inherit; text-decoration:none; }
@@ -69,6 +69,7 @@ h2 { font-family:Georgia,serif; font-size:clamp(32px,3.3vw,46px); font-weight:40
 .role-switch{background:#ece8dd;border-radius:999px;display:flex;gap:2px;justify-self:end;padding:3px}
 .role-switch button{background:transparent;border:0;border-radius:999px;cursor:pointer;font-size:11px;font-weight:720;padding:7px 10px}
 .role-switch button.active{background:white;box-shadow:0 1px 6px rgba(35,48,39,.12)}
+.topbar-actions{align-items:center;display:flex;gap:10px;justify-self:end}
 .food-art.plum{background:#77556d}.food-art.tomato{background:#b7472e}.food-art.blue{background:#597d80}
 .modal-backdrop{align-items:center;background:rgba(25,33,28,.62);display:flex;inset:0;justify-content:center;padding:20px;position:fixed;z-index:50}
 .modal-card{background:var(--paper);box-shadow:0 26px 80px rgba(14,20,16,.28);max-height:calc(100vh - 32px);overflow:auto;padding:42px;position:relative;width:min(540px,100%)}
@@ -89,3 +90,13 @@ h2 { font-family:Georgia,serif; font-size:clamp(32px,3.3vw,46px); font-weight:40
 
 @media(max-width:850px){.role-switch{display:none}.dashboard-hero{align-items:flex-start}.shift-card{height:170px;min-width:170px;width:170px}.shift-card>strong{font-size:45px}.table-head{display:none}.table-row{gap:12px;grid-template-columns:1fr 1fr}.table-row>span:first-child{grid-column:1/3}.planner-controls{gap:18px;grid-template-columns:1fr 1fr}.planner-note{grid-column:1/3}.recipe-card{grid-template-columns:1fr}.impact-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:580px){.modal-card{padding:32px 20px}.dashboard-hero{display:block}.shift-card{display:none}.dashboard-title{align-items:start;flex-direction:column;gap:16px}.table-row{grid-template-columns:1fr}.table-row>span:first-child{grid-column:auto}.table-row>span:nth-child(3),.table-row>span:nth-child(4){display:none}.planner-controls{grid-template-columns:1fr}.planner-note{grid-column:auto}.recipe-copy,.route-card{padding:25px}.recipe-stats{grid-template-columns:repeat(2,1fr);gap:18px}.recipe-rank{display:none}.stop{grid-template-columns:auto 1fr}.stop time{display:none}.impact-grid{grid-template-columns:1fr}.role-switch{display:flex}.topbar{padding:0 16px}.brand>span:last-child{display:none}}
+/* AWS Cognito account controls */
+.account-button { border: 1px solid var(--ink); border-radius: 999px; background: transparent; color: var(--ink); font: inherit; font-weight: 700; padding: .6rem .9rem; cursor: pointer; }
+.auth-modal { max-width: 460px; }
+.auth-form { display: grid; gap: 1rem; margin-top: 1.5rem; }
+.auth-form label { display: grid; gap: .45rem; color: var(--ink); font-size: .8rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.auth-form input { border: 1px solid rgba(34,35,30,.25); border-radius: 10px; background: #fffef8; color: var(--ink); font: inherit; font-size: 1rem; padding: .85rem 1rem; text-transform: none; }
+.auth-form input:focus { border-color: var(--green); outline: 3px solid rgba(60,91,65,.14); }
+.auth-error { color: #9a2f23; font-weight: 700; margin: 0; }
+.account-type{display:grid;grid-template-columns:1fr 1fr;gap:8px}.account-type button{background:#f0ede5;border:1px solid var(--line);cursor:pointer;font-weight:700;padding:13px}.account-type button.active{background:var(--green);border-color:var(--green);color:white}
+.setup-note{color:var(--muted);font-size:12px;line-height:1.45;margin:0}

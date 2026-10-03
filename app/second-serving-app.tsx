@@ -1,10 +1,12 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useAuth } from './auth-context';
+import { api } from './api';
 
 type Listing = {
   id: string; donor: string; title: string; detail: string; quantity: number;
-  unit: 'meals' | 'lb' | 'boxes'; time: string; distance: number; tone: string;
+  unit: 'meals' | 'lb' | 'boxes' | 'kg' | 'items' | 'trays'; time: string; distance: number; tone: string;
   readiness: 'Ready to eat' | 'Needs cooking'; category: 'meal' | 'ingredient'; allergens: string;
 };
 
@@ -20,13 +22,14 @@ const seedListings: Listing[] = [
 const quickDraft = 'We have 12 chicken and rice boxes, plus about 8 pounds of carrots and 5 pounds of potatoes. Pickup between 9 and 9:45 tonight.';
 
 export default function SecondServingApp() {
+  const auth = useAuth();
   const [role, setRole] = useState<'recipient' | 'donor'>('recipient');
   const [view, setView] = useState<'browse' | 'planner' | 'impact'>('browse');
   const [filter, setFilter] = useState<'all' | 'meal' | 'ingredient'>('all');
   const [listings, setListings] = useState(seedListings);
   const [selected, setSelected] = useState<Listing | null>(null);
   const [reserveQty, setReserveQty] = useState(1);
-  const [confirmation, setConfirmation] = useState<{title:string;quantity:number;code:string} | null>(null);
+  const [confirmation, setConfirmation] = useState<{title:string;quantity:number;code:string;address?:string;pickup?:string} | null>(null);
   const [donationOpen, setDonationOpen] = useState(false);
   const [intakeText, setIntakeText] = useState('');
   const [drafts, setDrafts] = useState<Listing[]>([]);
@@ -35,15 +38,36 @@ export default function SecondServingApp() {
   const [maxMiles, setMaxMiles] = useState(3);
   const [planReserved, setPlanReserved] = useState(false);
   const [toast, setToast] = useState('');
+  const [agentBusy, setAgentBusy] = useState(false);
   const visibleListings = useMemo(() => listings.filter(item => item.quantity > 0 && (filter === 'all' || item.category === filter)), [listings, filter]);
   const servings = listings.reduce((total,item) => total + (item.unit === 'meals' ? item.quantity : Math.round(item.quantity * .7)),0);
 
+  useEffect(() => {
+    if (!auth.configured) return;
+    void api<{items:Array<Record<string, unknown>>}>('/listings').then(({items}) => {
+      if (!items.length) return;
+      setListings(items.map((item, index) => ({
+        id: String(item.listingId), donor: String(item.organizationName || 'Local kitchen'), title: String(item.title), detail: String(item.description || ''),
+        quantity: Number(item.quantityAvailable), unit: (['meals','lb','boxes','kg','items','trays'].includes(String(item.unit)) ? item.unit : 'boxes') as Listing['unit'],
+        time: String(item.pickupLabel || 'See pickup details'), distance: Number(item.distanceMiles || 0), tone: ['coral','green','gold','plum','tomato','blue'][index % 6],
+        readiness: item.readiness === 'needs_cooking' ? 'Needs cooking' : 'Ready to eat', category: item.category === 'ingredient' ? 'ingredient' : 'meal',
+        allergens: Array.isArray(item.allergens) && item.allergens.length ? `Contains: ${item.allergens.join(', ')}` : 'No reported major allergens',
+      })));
+    }).catch(() => notify('Live listings are unavailable, so sample data is shown.'));
+  }, [auth.configured]);
+
   function notify(message:string) { setToast(message); window.setTimeout(() => setToast(''),2800); }
-  function reserve() {
+  async function reserve() {
     if (!selected) return;
+    if (auth.configured && !auth.user) { auth.openAuth(); return; }
     const quantity = Math.min(reserveQty,selected.quantity);
+    let code=String(Math.floor(1000+Math.random()*9000));
+    if (auth.configured) {
+      try { const result=await api<{pickupCode:string;pickupAddress?:string;pickupLabel?:string}>('/reservations',{method:'POST',body:JSON.stringify({listingId:selected.id,quantity})});code=result.pickupCode;setConfirmation({title:selected.title,quantity,code,address:result.pickupAddress,pickup:result.pickupLabel}); }
+      catch (error) { notify(error instanceof Error ? error.message : 'Reservation failed.'); return; }
+    }
     setListings(items => items.map(item => item.id === selected.id ? {...item,quantity:item.quantity-quantity} : item));
-    setConfirmation({title:selected.title,quantity,code:String(Math.floor(1000+Math.random()*9000))});
+    if(!auth.configured)setConfirmation({title:selected.title,quantity,code});
     setSelected(null); setReserveQty(1);
   }
   function startVoice() {
@@ -54,8 +78,20 @@ export default function SecondServingApp() {
     recognition.onresult=event=>setIntakeText(event.results[0][0].transcript); recognition.onend=()=>setListening(false);
     setListening(true); recognition.start();
   }
-  function makeDrafts() {
+  async function makeDrafts() {
     const text=intakeText.trim()||quickDraft;
+    const organizationId=auth.profile?.memberships[0]?.organizationId;
+    if(auth.configured){
+      if(!auth.user){auth.openAuth();return;}
+      if(!organizationId){notify('Switch this account to a kitchen profile before posting food.');return;}
+      setAgentBusy(true);
+      try{
+        const result=await api<{items:Array<{title:string;description:string;quantity:number;unit:Listing['unit'];category:'meal'|'ingredient';readiness:'ready_to_eat'|'needs_cooking';allergens:string[];pickup_start?:string;pickup_end?:string;needs_review:string[]}>}>('/agent/extract',{method:'POST',body:JSON.stringify({organizationId,shiftNote:text})});
+        setDrafts(result.items.map((item,index)=>({id:`draft-${Date.now()}-${index}`,donor:'Your kitchen',title:item.title,detail:item.description,quantity:item.quantity,unit:item.unit,time:item.pickup_start&&item.pickup_end?`${item.pickup_start}–${item.pickup_end}`:'Pickup time needs review',distance:0,tone:item.category==='meal'?'coral':'green',readiness:item.readiness==='needs_cooking'?'Needs cooking':'Ready to eat',category:item.category,allergens:item.allergens.length?`Contains: ${item.allergens.join(', ')}`:item.needs_review.includes('allergens')?'Allergens need review':'No reported major allergens'})));
+      }catch(error){notify(error instanceof Error?error.message:'AI extraction failed.');}
+      finally{setAgentBusy(false);}
+      return;
+    }
     const pickup=text.match(/(?:between|from)\s+([\d:]+)\s*(?:and|to|–|-)\s*([\d:]+)/i);
     const time=pickup?`${pickup[1]}–${pickup[2]} PM`:'9:00–9:45 PM';
     const parsed:Listing[]=[];
@@ -67,7 +103,20 @@ export default function SecondServingApp() {
     if(!parsed.length) parsed.push({id:`draft-${Date.now()}`,donor:'Your kitchen',title:'End-of-shift surplus',detail:text,quantity:1,unit:'boxes',time,distance:.8,tone:'gold',readiness:'Ready to eat',category:'meal',allergens:'Allergens not specified'});
     setDrafts(parsed);
   }
-  function publishDrafts(){setListings(items=>[...drafts,...items]);setDrafts([]);setIntakeText('');setDonationOpen(false);setRole('donor');notify(`${drafts.length} donation${drafts.length===1?'':'s'} published.`);}
+  async function publishDrafts(){
+    const organizationId=auth.profile?.memberships[0]?.organizationId;
+    let publishedDrafts=drafts;
+    if(auth.configured&&organizationId){
+      setAgentBusy(true);
+      try{
+        const pickupEnd=new Date(Date.now()+2*60*60*1000).toISOString();
+        const created=await Promise.all(drafts.map(draft=>api<Record<string,unknown>>('/listings',{method:'POST',body:JSON.stringify({organizationId,title:draft.title,description:draft.detail,quantityAvailable:draft.quantity,unit:draft.unit,category:draft.category,readiness:draft.readiness==='Needs cooking'?'needs_cooking':'ready_to_eat',allergens:draft.allergens.startsWith('Contains:')?draft.allergens.replace('Contains:','').split(',').map(value=>value.trim()):[],pickupEnd,pickupLabel:draft.time})})));
+        publishedDrafts=drafts.map((draft,index)=>({...draft,id:String(created[index].listingId)}));
+      }catch(error){notify(error instanceof Error?error.message:'Publishing failed.');setAgentBusy(false);return;}
+      setAgentBusy(false);
+    }
+    setListings(items=>[...publishedDrafts,...items]);setDrafts([]);setIntakeText('');setDonationOpen(false);setRole('donor');notify(`${publishedDrafts.length} donation${publishedDrafts.length===1?'':'s'} published.`);
+  }
   function reservePlan(){setListings(items=>items.map(item=>item.id==='greenhouse'?{...item,quantity:Math.max(0,item.quantity-10)}:item.id==='sunflour'?{...item,quantity:Math.max(0,item.quantity-1)}:item));setPlanReserved(true);}
   function closeDonation(){setDonationOpen(false);setDrafts([]);setIntakeText('');}
 
@@ -75,12 +124,12 @@ export default function SecondServingApp() {
     <header className="topbar">
       <button className="brand reset-button" onClick={()=>{setView('browse');setRole('recipient')}} aria-label="Second Serving home"><span className="brand-mark">2</span><span>Second Serving</span></button>
       <nav aria-label="Primary navigation"><button className={`nav-link reset-button ${view==='browse'?'active':''}`} onClick={()=>setView('browse')}>Find food</button><button className={`nav-link reset-button ${view==='planner'?'active':''}`} onClick={()=>setView('planner')}>Meal planner <span className="new-dot">AI</span></button><button className={`nav-link reset-button ${view==='impact'?'active':''}`} onClick={()=>setView('impact')}>Impact</button></nav>
-      <div className="role-switch" aria-label="Demo role"><button className={role==='recipient'?'active':''} onClick={()=>setRole('recipient')}>Recipient</button><button className={role==='donor'?'active':''} onClick={()=>setRole('donor')}>Kitchen</button></div>
+      <div className="topbar-actions"><div className="role-switch" aria-label="Demo role"><button className={role==='recipient'?'active':''} onClick={()=>setRole('recipient')}>Recipient</button><button className={role==='donor'?'active':''} onClick={()=>setRole('donor')}>Kitchen</button></div>{auth.configured && (auth.user ? <button className="account-button" onClick={() => void auth.logout()}>Sign out</button> : <button className="account-button" onClick={auth.openAuth}>Sign in</button>)}</div>
     </header>
     {role==='donor'?<DonorDashboard listings={listings} onPost={()=>setDonationOpen(true)} onSwitch={()=>setRole('recipient')} notify={notify}/>:view==='planner'?<Planner maxStops={maxStops} setMaxStops={setMaxStops} maxMiles={maxMiles} setMaxMiles={setMaxMiles} reserved={planReserved} onReserve={reservePlan} onBack={()=>setView('browse')}/>:view==='impact'?<Impact servings={servings} onBack={()=>setView('browse')}/>:<Browse listings={listings} visibleListings={visibleListings} servings={servings} filter={filter} setFilter={setFilter} openPlanner={()=>setView('planner')} select={listing=>{setSelected(listing);setReserveQty(1)}} openDonation={()=>setDonationOpen(true)}/>} 
     {selected&&<ReservationModal listing={selected} quantity={reserveQty} setQuantity={setReserveQty} onClose={()=>setSelected(null)} onReserve={reserve}/>} 
     {confirmation&&<Confirmation data={confirmation} onClose={()=>setConfirmation(null)}/>} 
-    {donationOpen&&<DonationModal text={intakeText} setText={setIntakeText} listening={listening} onVoice={startVoice} drafts={drafts} onAnalyze={makeDrafts} onPublish={publishDrafts} onClose={closeDonation}/>} 
+    {donationOpen&&<DonationModal text={intakeText} setText={setIntakeText} listening={listening} busy={agentBusy} onVoice={startVoice} drafts={drafts} onAnalyze={makeDrafts} onPublish={publishDrafts} onClose={closeDonation}/>}
     {toast&&<div className="toast" role="status">✓ {toast}</div>}
   </main>;
 }
@@ -93,9 +142,9 @@ function FoodCard({listing,onSelect}:{listing:Listing;onSelect:()=>void}){return
 
 function ReservationModal({listing,quantity,setQuantity,onClose,onReserve}:{listing:Listing;quantity:number;setQuantity:(n:number)=>void;onClose:()=>void;onReserve:()=>void}){const max=listing.unit==='meals'?Math.min(4,listing.quantity):Math.min(10,listing.quantity);return <div className="modal-backdrop" onMouseDown={onClose}><section className="modal-card reserve-modal" role="dialog" aria-modal="true" onMouseDown={e=>e.stopPropagation()}><button className="close-button" onClick={onClose}>×</button><p className="eyebrow">{listing.donor} · {listing.distance} mi away</p><h2>{listing.title}</h2><p className="modal-lede">{listing.detail}</p><div className="notice-row"><span>◷</span><div><strong>Pickup tonight</strong><small>{listing.time} · Exact address after reserving</small></div></div><div className="notice-row"><span>i</span><div><strong>Allergen information</strong><small>{listing.allergens}</small></div></div><div className="quantity-row"><div><strong>How much?</strong><small>Maximum {max} {listing.unit}</small></div><div className="stepper"><button onClick={()=>setQuantity(Math.max(1,quantity-1))}>−</button><strong>{quantity}</strong><button onClick={()=>setQuantity(Math.min(max,quantity+1))}>＋</button></div></div><button className="primary-action" onClick={onReserve}>Reserve for pickup</button><p className="fine-print">Please cancel if your plans change so someone else can collect it.</p></section></div>}
 
-function Confirmation({data,onClose}:{data:{title:string;quantity:number;code:string};onClose:()=>void}){return <div className="modal-backdrop"><section className="modal-card confirmation" role="dialog" aria-modal="true"><div className="success-mark">✓</div><p className="eyebrow">Reservation confirmed</p><h2>It’s yours.</h2><p>{data.quantity} × {data.title}</p><div className="pickup-code"><small>Show this code at pickup</small><strong>{data.code}</strong></div><div className="pickup-address"><strong>Harvest Table · Side entrance</strong><span>1501 Central Ave, Charlotte</span><span>Pickup tonight · 8:15–9:00 PM</span></div><button className="primary-action" onClick={onClose}>Done</button></section></div>}
+function Confirmation({data,onClose}:{data:{title:string;quantity:number;code:string;address?:string;pickup?:string};onClose:()=>void}){return <div className="modal-backdrop"><section className="modal-card confirmation" role="dialog" aria-modal="true"><div className="success-mark">✓</div><p className="eyebrow">Reservation confirmed</p><h2>It’s yours.</h2><p>{data.quantity} × {data.title}</p><div className="pickup-code"><small>Show this code at pickup</small><strong>{data.code}</strong></div><div className="pickup-address"><strong>Pickup details</strong><span>{data.address||'1501 Central Ave, Charlotte'}</span><span>{data.pickup||'Tonight · 8:15–9:00 PM'}</span></div><button className="primary-action" onClick={onClose}>Done</button></section></div>}
 
-function DonationModal({text,setText,listening,onVoice,drafts,onAnalyze,onPublish,onClose}:{text:string;setText:(v:string)=>void;listening:boolean;onVoice:()=>void;drafts:Listing[];onAnalyze:()=>void;onPublish:()=>void;onClose:()=>void}){return <div className="modal-backdrop" onMouseDown={onClose}><section className="modal-card donation-modal" role="dialog" aria-modal="true" onMouseDown={e=>e.stopPropagation()}><button className="close-button" onClick={onClose}>×</button><p className="eyebrow">Fast donation entry</p><h2>Tell us what’s left.</h2><p className="modal-lede">Speak naturally—include quantities and a pickup window. You’ll review everything before it goes live.</p>{drafts.length===0?<><div className={`voice-box ${listening?'listening':''}`}><textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Example: We have 12 chicken and rice boxes, plus 8 pounds of carrots…"/><button className="mic-button" onClick={onVoice}>{listening?'Listening…':'◉ Speak instead'}</button></div><button className="primary-action" onClick={onAnalyze}>Create donation draft <span>✦</span></button><button className="sample-link" onClick={()=>setText(quickDraft)}>Use a sample shift note</button></>:<><div className="review-heading"><strong>Review {drafts.length} suggested posts</strong><span>Nothing publishes until you confirm.</span></div><div className="draft-list">{drafts.map(draft=><div className="draft-card" key={draft.id}><span className={`draft-icon ${draft.tone}`}>{draft.category==='meal'?'●':'✦'}</span><div><strong>{draft.title}</strong><p>{draft.detail}</p><small>{draft.quantity} {draft.unit} · Pickup {draft.time}</small><em>{draft.allergens}</em></div><button>Edit</button></div>)}</div><button className="primary-action" onClick={onPublish}>Publish {drafts.length} donation{drafts.length===1?'':'s'}</button></>}</section></div>}
+function DonationModal({text,setText,listening,busy,onVoice,drafts,onAnalyze,onPublish,onClose}:{text:string;setText:(v:string)=>void;listening:boolean;busy:boolean;onVoice:()=>void;drafts:Listing[];onAnalyze:()=>void|Promise<void>;onPublish:()=>void|Promise<void>;onClose:()=>void}){return <div className="modal-backdrop" onMouseDown={onClose}><section className="modal-card donation-modal" role="dialog" aria-modal="true" onMouseDown={e=>e.stopPropagation()}><button className="close-button" onClick={onClose}>×</button><p className="eyebrow">Fast donation entry</p><h2>Tell us what’s left.</h2><p className="modal-lede">Speak naturally—include quantities and a pickup window. You’ll review everything before it goes live.</p>{drafts.length===0?<><div className={`voice-box ${listening?'listening':''}`}><textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Example: We have 12 chicken and rice boxes, plus 8 pounds of carrots…"/><button className="mic-button" onClick={onVoice}>{listening?'Listening…':'◉ Speak instead'}</button></div><button className="primary-action" disabled={busy} onClick={onAnalyze}>{busy?'Creating draft…':'Create donation draft ✦'}</button><button className="sample-link" onClick={()=>setText(quickDraft)}>Use a sample shift note</button></>:<><div className="review-heading"><strong>Review {drafts.length} suggested posts</strong><span>Nothing publishes until you confirm.</span></div><div className="draft-list">{drafts.map(draft=><div className="draft-card" key={draft.id}><span className={`draft-icon ${draft.tone}`}>{draft.category==='meal'?'●':'✦'}</span><div><strong>{draft.title}</strong><p>{draft.detail}</p><small>{draft.quantity} {draft.unit} · Pickup {draft.time}</small><em>{draft.allergens}</em></div><button>Edit</button></div>)}</div><button className="primary-action" disabled={busy} onClick={onPublish}>{busy?'Publishing…':`Publish ${drafts.length} donation${drafts.length===1?'':'s'}`}</button></>}</section></div>}
 
 function DonorDashboard({listings,onPost,onSwitch,notify}:{listings:Listing[];onPost:()=>void;onSwitch:()=>void;notify:(m:string)=>void}){const own=listings.filter(item=>item.donor==='Your kitchen');return <div className="dashboard"><section className="dashboard-hero"><div><p className="eyebrow">Your kitchen · Friday night</p><h1>Save the surplus.<br/><em>Skip the typing.</em></h1><p className="hero-description">Speak what’s left at the end of service. We’ll organize the items, quantities, and pickup window for your review.</p><button className="voice-primary" onClick={onPost}><span>◉</span> Start a quick donation</button></div><div className="shift-card"><span>Tonight’s impact</span><strong>{own.reduce((sum,x)=>sum+x.quantity,0)||42}</strong><small>{own.length?'units newly available':'servings shared'}</small><div><b>4</b> pickups completed</div></div></section><section className="dashboard-content"><div className="dashboard-title"><div><p className="eyebrow">Live pickups</p><h2>Tonight’s donations</h2></div><button className="secondary-button" onClick={onSwitch}>See recipient view</button></div><div className="pickup-table"><div className="table-head"><span>Donation</span><span>Available</span><span>Pickup window</span><span>Status</span><span></span></div>{(own.length?own:seedListings.slice(0,2)).map(item=><div className="table-row" key={item.id}><span><i className={`mini-art ${item.tone}`}>{item.category==='meal'?'●':'✦'}</i><b>{item.title}</b><small>{item.detail}</small></span><span>{item.quantity} {item.unit}</span><span>{item.time}</span><span><mark>Accepting reservations</mark></span><button onClick={()=>notify('Pickup list opened.')}>Manage →</button></div>)}</div></section></div>}
 
