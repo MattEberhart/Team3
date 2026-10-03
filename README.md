@@ -21,15 +21,15 @@ Second Serving is a local surplus-food marketplace built by Team 3. Kitchens des
 3. Choose a quantity and receive the exact pickup address and pickup code.
 4. Use the ingredient-planning experience to find recipes constrained by maximum stops and route distance.
 
-### Hackathon demo
+### End-to-end test flow
 
-The deployed development environment contains six clearly labeled demo listings. A strong end-to-end demonstration is:
+The development environment starts without seeded food or manufactured activity. To test the complete live flow:
 
-1. Browse the demo inventory.
-2. Create and verify a recipient account.
-3. Reserve part of a listing and observe its quantity decrease atomically.
-4. Create a kitchen account and dictate an end-of-shift note.
-5. Review the AI-created drafts before publishing.
+1. Create and verify a kitchen account.
+2. Speak or type an end-of-shift note, review the AI-created drafts, and publish a listing.
+3. Create and verify a separate recipient account.
+4. Reserve part of the listing and confirm its available quantity decreases atomically.
+5. Verify the exact pickup location is disclosed only after the reservation succeeds.
 
 ## Stack
 
@@ -87,7 +87,7 @@ The OpenAI key is fetched by Lambda from Secrets Manager and is never compiled i
 - API: https://1h502bm01h.execute-api.us-east-1.amazonaws.com/dev
 - CloudFormation stack: `second-serving-dev` in `us-east-1`
 
-The development database includes six clearly labeled demo listings for the hackathon flow. Their exact demo pickup location is omitted from public responses and returned only after a successful reservation.
+The development database is intentionally unseeded. Listings, reservations, and visible availability should come only from accounts actively testing the application. Exact pickup locations are omitted from public responses and returned only after a successful reservation.
 
 ## Data model
 
@@ -112,7 +112,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Without AWS values, the app intentionally runs as an interactive sample-data demo. With the public AWS values populated, Cognito, live listings, reservations, onboarding, and AI extraction are enabled.
+Without AWS values, the app renders a safe empty state for local UI work. With the public AWS values populated, Cognito, live listings, reservations, onboarding, and AI extraction are enabled.
 
 ### Public frontend configuration
 
