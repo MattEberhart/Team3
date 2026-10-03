@@ -48,6 +48,90 @@ class RepositorySerializationTests(unittest.TestCase):
             },
         )
 
+    def test_listing_reservations_require_membership_and_include_recipient_name(self):
+        repository = Repository.__new__(Repository)
+        repository.get_listing = lambda listing_id: {
+            "listingId": listing_id,
+            "organizationId": "kitchen-1",
+            "title": "Dinner boxes",
+            "organizationName": "Good Kitchen",
+            "pickupAddress": "123 Main St",
+            "pickupLabel": "6–7 PM",
+        }
+        checked = []
+        repository.require_membership = lambda user_id, organization_id, roles: checked.append((user_id, organization_id, roles))
+        repository.reservations = SimpleNamespace(query=lambda **kwargs: {"Items": [{
+            "reservationId": "reservation-1",
+            "listingId": "listing-1",
+            "recipientUserId": "recipient-1",
+            "quantity": Decimal("2"),
+            "status": "reserved",
+            "pickupCode": "1234",
+            "createdAt": "2026-10-03T12:00:00+00:00",
+        }]})
+        repository.users = SimpleNamespace(get_item=lambda **kwargs: {"Item": {"displayName": "Sam"}})
+
+        result = repository.reservations_for_listing("staff-1", "listing-1")
+
+        self.assertEqual(checked[0][0:2], ("staff-1", "kitchen-1"))
+        self.assertEqual(result[0]["recipientName"], "Sam")
+        self.assertEqual(result[0]["title"], "Dinner boxes")
+
+    def test_recipient_reservations_include_pickup_details(self):
+        repository = Repository.__new__(Repository)
+        repository.reservations = SimpleNamespace(query=lambda **kwargs: {"Items": [{
+            "reservationId": "reservation-1",
+            "listingId": "listing-1",
+            "recipientUserId": "recipient-1",
+            "quantity": Decimal("1"),
+            "status": "reserved",
+            "pickupCode": "9876",
+            "createdAt": "2026-10-03T12:00:00+00:00",
+        }]})
+        repository.get_listing = lambda listing_id: {
+            "title": "Soup",
+            "organizationName": "Neighborhood Kitchen",
+            "pickupAddress": "10 Oak Ave",
+            "pickupLabel": "7–8 PM",
+        }
+
+        result = repository.reservations_for_user("recipient-1")
+
+        self.assertEqual(result[0]["pickupAddress"], "10 Oak Ave")
+        self.assertEqual(result[0]["organizationName"], "Neighborhood Kitchen")
+
+    def test_complete_reservation_records_completion(self):
+        repository = Repository.__new__(Repository)
+        repository.reservations = SimpleNamespace(
+            get_item=lambda **kwargs: {"Item": {
+                "reservationId": "reservation-1",
+                "listingId": "listing-1",
+                "recipientUserId": "recipient-1",
+                "quantity": Decimal("2"),
+                "status": "reserved",
+                "pickupCode": "1234",
+            }},
+            update_item=lambda **kwargs: {"Attributes": {
+                "reservationId": "reservation-1",
+                "listingId": "listing-1",
+                "recipientUserId": "recipient-1",
+                "quantity": Decimal("2"),
+                "status": "completed",
+                "pickupCode": "1234",
+                "completedBy": "staff-1",
+            }},
+        )
+        repository.get_listing = lambda listing_id: {
+            "organizationId": "kitchen-1", "title": "Dinner boxes"
+        }
+        repository.require_membership = lambda *args: None
+        repository.users = SimpleNamespace(get_item=lambda **kwargs: {"Item": {"displayName": "Sam"}})
+
+        result = repository.complete_reservation("staff-1", "reservation-1")
+
+        self.assertEqual(result["status"], "completed")
+        self.assertNotIn("completedBy", result)
+
 
 if __name__ == "__main__":
     unittest.main()

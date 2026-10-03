@@ -239,7 +239,68 @@ class Repository:
             ScanIndexForward=False,
             Limit=min(limit, 100),
         )
-        return json_safe(result.get("Items", []))
+        return [self._reservation_details(item) for item in result.get("Items", [])]
+
+    def reservations_for_listing(self, user_id: str, listing_id: str, limit: int = 100) -> list[dict]:
+        listing = self.get_listing(listing_id)
+        if not listing:
+            raise LookupError("Listing not found.")
+        self.require_membership(user_id, listing["organizationId"], {"owner", "manager", "staff"})
+        result = self.reservations.query(
+            IndexName="ListingIndex",
+            KeyConditionExpression=Key("listingId").eq(listing_id),
+            ScanIndexForward=False,
+            Limit=min(limit, 100),
+        )
+        return [self._reservation_details(item, listing=listing, include_recipient=True) for item in result.get("Items", [])]
+
+    def complete_reservation(self, user_id: str, reservation_id: str) -> dict:
+        reservation = self.reservations.get_item(
+            Key={"reservationId": reservation_id}, ConsistentRead=True
+        ).get("Item")
+        if not reservation:
+            raise LookupError("Reservation not found.")
+        listing = self.get_listing(str(reservation["listingId"]))
+        if not listing:
+            raise LookupError("Listing not found.")
+        self.require_membership(user_id, listing["organizationId"], {"owner", "manager", "staff"})
+        if reservation.get("status") == "completed":
+            return self._reservation_details(reservation, listing=listing, include_recipient=True)
+        completed_at = now_iso()
+        result = self.reservations.update_item(
+            Key={"reservationId": reservation_id},
+            UpdateExpression="SET #status = :completed, completedAt = :completed_at, completedBy = :completed_by",
+            ConditionExpression="#status = :reserved",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":reserved": "reserved",
+                ":completed": "completed",
+                ":completed_at": completed_at,
+                ":completed_by": user_id,
+            },
+            ReturnValues="ALL_NEW",
+        )
+        return self._reservation_details(result["Attributes"], listing=listing, include_recipient=True)
+
+    def _reservation_details(self, reservation: dict, *, listing: dict | None = None, include_recipient: bool = False) -> dict:
+        safe_reservation = json_safe(reservation)
+        listing = listing or self.get_listing(str(safe_reservation["listingId"])) or {}
+        details = {
+            **safe_reservation,
+            "title": listing.get("title", "Food pickup"),
+            "unit": listing.get("unit", "items"),
+            "organizationName": listing.get("organizationName", "Local kitchen"),
+            "pickupAddress": listing.get("pickupAddress", ""),
+            "pickupLabel": listing.get("pickupLabel", ""),
+        }
+        if include_recipient:
+            recipient = self.users.get_item(
+                Key={"userId": safe_reservation["recipientUserId"]}
+            ).get("Item") or {}
+            details["recipientName"] = recipient.get("displayName", "Food seeker")
+        details.pop("recipientUserId", None)
+        details.pop("completedBy", None)
+        return json_safe(details)
 
     def save_agent_draft(self, user_id: str, organization_id: str, kind: str, payload: dict) -> dict:
         self.require_membership(user_id, organization_id, {"owner", "manager", "staff"})

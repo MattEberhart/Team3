@@ -156,6 +156,12 @@ Resources:
         MyReservations:
           Type: HttpApi
           Properties: {ApiId: !Ref HttpApi, Path: /me/reservations, Method: GET}
+        ListingReservations:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/listings/{listingId}/reservations', Method: GET}
+        CompleteReservation:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/reservations/{reservationId}/complete', Method: POST}
         MyProfile:
           Type: HttpApi
           Properties: {ApiId: !Ref HttpApi, Path: /me, Method: GET}

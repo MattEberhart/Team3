@@ -134,6 +134,14 @@ def handler(event, _context):
         if route_key == "GET /me/reservations":
             return response(200, {"items": repository.reservations_for_user(user_id)})
 
+        if route_key == "GET /listings/{listingId}/reservations":
+            listing_id = event.get("pathParameters", {}).get("listingId", "")
+            return response(200, {"items": repository.reservations_for_listing(user_id, listing_id)})
+
+        if route_key == "POST /reservations/{reservationId}/complete":
+            reservation_id = event.get("pathParameters", {}).get("reservationId", "")
+            return response(200, repository.complete_reservation(user_id, reservation_id))
+
         if route_key == "POST /uploads":
             data = body_from(event)
             require_fields(data, "contentType", "purpose")
@@ -161,12 +169,16 @@ def handler(event, _context):
         return response(404, {"error": "Route not found."})
     except PermissionError as error:
         return response(403, {"error": str(error)})
+    except LookupError as error:
+        return response(404, {"error": str(error)})
     except (ValueError, json.JSONDecodeError) as error:
         return response(400, {"error": str(error)})
     except ClientError as error:
         error_code = error.response.get("Error", {}).get("Code")
         if route_key in {"POST /reservations", "POST /reservations/bulk"} and error_code in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
             return response(409, {"error": "Some of that food is no longer available. Nothing was reserved."})
+        if route_key == "POST /reservations/{reservationId}/complete" and error_code == "ConditionalCheckFailedException":
+            return response(409, {"error": "This pickup can no longer be completed."})
         if route_key == "POST /me/bootstrap" and error_code in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
             return response(409, {"error": "We could not finish setting up this profile. Please sign out, sign back in, and try again."})
         print(json.dumps({"event": "aws_error", "code": error_code}))
