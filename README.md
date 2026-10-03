@@ -108,6 +108,17 @@ Meal-plan bundles use the same pattern across every selected listing. All invent
 
 The transaction path uses DynamoDB's low-level client and explicit `AttributeValue` serialization. Resource-style clients must not be substituted there because doing so would serialize transaction keys twice.
 
+### South End demo data
+
+Seed the deployed development stack with six deterministic kitchen profiles and 30 published ingredient listings for South End Charlotte:
+
+```bash
+PYTHONPATH=backend python3 backend/seed_demo.py --dry-run
+PYTHONPATH=backend python3 backend/seed_demo.py
+```
+
+The seed includes Club West Brewing, Chapter 6, Tremont Kitchen + Bar, Superica, Hawkers Asian Street Food, and Barcelona Wine Bar. Rerunning it refreshes quantities and pickup windows without duplicating records. It only upserts records carrying the deterministic `south-end-demo-v1` seed IDs; unrelated user data is not changed or deleted.
+
 ## Local frontend
 
 ```bash
@@ -188,7 +199,8 @@ Traces include model and tool inputs and outputs. Treat the LangSmith workspace 
 - Account: `GET /me`, `POST /me/bootstrap`
 - Recipient: `POST /reservations`, `GET /me/reservations`
 - Donor: `POST /listings`, `POST /uploads`, `POST /agent/extract`
-- Planning: `POST /agent/recipes` using browser coordinates or a US ZIP code
+- Planning: `POST /agent/recipes` queues a recipe run using browser coordinates or a US ZIP code
+- Recipe runs: `GET /agent/recipes` lists the signed-in user's recent runs; `GET /agent/recipes/{runId}` returns status and saved results
 - Atomic plan reservation: `POST /reservations/bulk`
 
 Reservations use a DynamoDB transaction with a conditional inventory decrement, so two recipients cannot successfully reserve the same final quantity.
@@ -196,7 +208,7 @@ Reservations use a DynamoDB transaction with a conditional inventory decrement, 
 ## Privacy and security notes
 
 - Exact pickup addresses and coordinates are stripped from public listing responses.
-- Recipient browser coordinates and ZIP geocoding results are used for the current planning request and are not stored.
+- Recipient browser coordinates and ZIP geocoding results are carried in the encrypted, short-lived recipe-job queue and are not saved with recipe results.
 - Pickup details are returned only after a successful authenticated reservation.
 - Uploads use five-minute presigned S3 URLs and an allowlist of image/audio content types.
 - Temporary voice objects expire from S3 after one day.
@@ -210,4 +222,4 @@ Reservations use a DynamoDB transaction with a conditional inventory decrement, 
 - The current route estimate uses straight-line legs with a conservative road-distance multiplier; a production version should use a real routing provider.
 - Donation review supports confirmation, but field-by-field editing should be completed before a public launch.
 - Add reservation cancellation/expiration, pickup completion, organization invitations, moderation, and operational dashboards.
-- Add asynchronous AI jobs if extraction regularly approaches API Gateway’s request timeout.
+- Move donation extraction to the background-job pattern if it regularly approaches API Gateway’s request timeout.

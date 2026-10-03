@@ -12,6 +12,7 @@ type Listing = {
 
 type RecipeIngredient = { listing_id:string; name:string; quantity:number; unit:Listing['unit'] };
 type RecipePlan = { title:string; servings:number; instructions:string[]; ingredients:RecipeIngredient[]; listing_ids:string[]; pantry_items:string[]; stops:number; estimated_route_miles:number; safety_notes:string[] };
+type RecipeRun = { runId:string; status:'queued'|'running'|'succeeded'|'failed'; maxStops:number; maxMiles:number; createdAt:string; updatedAt:string; result?:{plans:RecipePlan[];explanation:string}; error?:string };
 type BundleReservation = { bundleId:string; reservations:Array<{reservationId:string;listingId:string;title:string;quantity:number;pickupCode:string;pickupAddress:string;pickupLabel:string}> };
 type PickupReservation = { reservationId:string; listingId:string; title:string; unit:Listing['unit']; organizationName:string; quantity:number; status:'reserved'|'completed'; pickupCode:string; pickupAddress:string; pickupLabel:string; recipientName?:string; createdAt:string; completedAt?:string };
 
@@ -178,14 +179,51 @@ function Planner({listings,maxStops,setMaxStops,maxMiles,setMaxMiles,onReserved,
   const [plans,setPlans]=useState<RecipePlan[]>([]);
   const [explanation,setExplanation]=useState('');
   const [locationError,setLocationError]=useState('');
-  const [busy,setBusy]=useState(false);
+  const [submitting,setSubmitting]=useState(false);
+  const [run,setRun]=useState<RecipeRun|null>(null);
   const [reserving,setReserving]=useState('');
   const [bundle,setBundle]=useState<BundleReservation|null>(null);
+  const processing=run?.status==='queued'||run?.status==='running';
+  const activeRunId=run?.runId;
+  const busy=submitting||processing;
+
+  useEffect(()=>{
+    if(!auth.user)return;
+    let active=true;
+    void api<{items:RecipeRun[]}>('/agent/recipes').then(({items})=>{
+      if(!active)return;
+      const selected=items.find(item=>item.status==='queued'||item.status==='running')||items.find(item=>item.status==='succeeded')||items[0];
+      if(!selected)return;
+      setRun(selected);
+      if(selected.status==='succeeded'&&selected.result){setPlans(selected.result.plans);setExplanation(selected.result.explanation);}
+      if(selected.status==='failed')setLocationError(selected.error||'Recipe planning failed. Please try again.');
+    }).catch(()=>{if(active)setLocationError('Previous recipe runs could not be loaded.');});
+    return()=>{active=false};
+  },[auth.user]);
+
+  useEffect(()=>{
+    if(!activeRunId||!processing)return;
+    let active=true;
+    let timer:number|undefined;
+    const poll=async()=>{
+      try{
+        const next=await api<RecipeRun>(`/agent/recipes/${activeRunId}`);
+        if(!active)return;
+        setLocationError('');
+        setRun(next);
+        if(next.status==='succeeded'&&next.result){setPlans(next.result.plans);setExplanation(next.result.explanation);return;}
+        if(next.status==='failed'){setLocationError(next.error||'Recipe planning failed. Please try again.');return;}
+      }catch{if(active)setLocationError('Recipe status is temporarily unavailable. Retrying…');}
+      if(active)timer=window.setTimeout(()=>void poll(),2500);
+    };
+    timer=window.setTimeout(()=>void poll(),1200);
+    return()=>{active=false;if(timer!==undefined)window.clearTimeout(timer)};
+  },[activeRunId,processing]);
 
   async function generate(usePostalCode:boolean){
     if(!auth.user){auth.openAuth();return;}
     if(!listings.length){notify('No live ingredients are available yet.');return;}
-    setBusy(true);setLocationError('');setPlans([]);setExplanation('');
+    setSubmitting(true);setLocationError('');setPlans([]);setExplanation('');
     try{
       let origin:{latitude?:number;longitude?:number;postalCode?:string};
       if(usePostalCode){
@@ -197,11 +235,10 @@ function Planner({listings,maxStops,setMaxStops,maxMiles,setMaxMiles,onReserved,
         const position=await new Promise<GeolocationPosition>((resolve,reject)=>navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:false,timeout:8000,maximumAge:300000}));
         origin={latitude:position.coords.latitude,longitude:position.coords.longitude};
       }
-      const result=await api<{plans:RecipePlan[];explanation:string}>('/agent/recipes',{method:'POST',body:JSON.stringify({...origin,maxStops,maxMiles})});
-      setPlans(result.plans);setExplanation(result.explanation);
-      if(!result.plans.length)notify('No practical meal plan fit those route limits.');
+      const result=await api<RecipeRun>('/agent/recipes',{method:'POST',body:JSON.stringify({...origin,maxStops,maxMiles})});
+      setRun(result);
     }catch(error){const geolocationFailure=Boolean(error&&typeof error==='object'&&'code' in error);setLocationError(geolocationFailure?'Location permission was not granted. Enter a ZIP code instead.':error instanceof Error?error.message:'Meal generation failed.');}
-    finally{setBusy(false);}
+    finally{setSubmitting(false);}
   }
 
   async function reserveBundle(plan:RecipePlan){
@@ -214,7 +251,7 @@ function Planner({listings,maxStops,setMaxStops,maxMiles,setMaxMiles,onReserved,
     finally{setReserving('');}
   }
 
-  return <div className="planner"><section className="planner-hero"><button className="back-link" onClick={onBack}>← Back to food</button><p className="eyebrow">Smart ingredient rescue</p><h1>What could we<br/><em>cook tonight?</em></h1><p className="hero-description">We combine expiring ingredients from nearby kitchens, then keep the pickup route practical.</p></section><section className="planner-controls"><div><label>Maximum stops <strong>{maxStops}</strong></label><input type="range" min="1" max="3" value={maxStops} onChange={e=>setMaxStops(Number(e.target.value))}/><span><small>1 stop</small><small>3 stops</small></span></div><div><label>Maximum route <strong>{maxMiles} miles</strong></label><input type="range" min="1" max="5" value={maxMiles} onChange={e=>setMaxMiles(Number(e.target.value))}/><span><small>Nearby</small><small>5 miles</small></span></div><div className="planner-note">✦ Suggestions use only live ingredient listings within these limits.</div></section><section className="plans"><div className="section-heading"><div><p className="eyebrow">Meal planner</p><h2>{listings.length?`${listings.length} live ingredient listing${listings.length===1?'':'s'} available`:'Waiting for live ingredients'}</h2></div></div>{!listings.length?<div className="empty-plan"><strong>No ingredients are available yet.</strong><p>Publish ingredient listings from kitchen accounts to begin testing meal planning.</p></div>:<><div className="planner-launch"><div><strong>Choose a starting point</strong><p>Your precise location is used for this request only and is not saved.</p></div><button className="primary-action" disabled={busy} onClick={()=>void generate(false)}>{busy?'Building plans…':'Use my location & generate'}</button><span>or</span><div className="zip-entry"><input aria-label="US ZIP code" inputMode="numeric" placeholder="ZIP code" value={postalCode} onChange={event=>setPostalCode(event.target.value)}/><button disabled={busy} onClick={()=>void generate(true)}>Generate with ZIP</button></div>{locationError&&<p className="planner-error" role="alert">{locationError}</p>}</div>{explanation&&<p className="plan-explanation">{explanation}</p>}{plans.map((plan,index)=><article className="recipe-card live-recipe" key={`${plan.title}-${index}`}><div className="recipe-copy"><div className="recipe-rank">{String(index+1).padStart(2,'0')}</div><p className="eyebrow">Uses {plan.ingredients.length} live listing{plan.ingredients.length===1?'':'s'}</p><h2>{plan.title}</h2><div className="recipe-stats"><span><b>{plan.servings}</b> servings</span><span><b>{plan.stops}</b> pickup stops</span><span><b>{plan.estimated_route_miles}</b> route miles</span><span><b>{plan.instructions.length}</b> cooking steps</span></div><div className="ingredient-pills">{plan.ingredients.map(item=><span key={item.listing_id}>{item.quantity} {item.unit} {item.name}</span>)}</div>{plan.pantry_items.length>0&&<p><strong>From your pantry:</strong> {plan.pantry_items.join(', ')}</p>}<ol className="recipe-steps">{plan.instructions.map((step,stepIndex)=><li key={stepIndex}>{step}</li>)}</ol>{plan.safety_notes.length>0&&<div className="safety-notes"><strong>Food safety</strong>{plan.safety_notes.map((note,noteIndex)=><p key={noteIndex}>{note}</p>)}</div>}<button className="primary-action" disabled={Boolean(reserving)} onClick={()=>void reserveBundle(plan)}>{reserving===plan.title?'Reserving everything…':'Reserve all ingredients'}</button></div><div className="route-card"><p className="eyebrow">Pickup bundle</p><h3>One confirmation.<br/>All-or-nothing reservation.</h3>{plan.ingredients.map((item,itemIndex)=><div className="stop" key={item.listing_id}><b>{itemIndex+1}</b><div><strong>{item.name}</strong><small>{item.quantity} {item.unit} reserved if every stop is available</small></div></div>)}<div className="route-total"><span>Total route estimate</span><strong>{plan.estimated_route_miles} mi · {plan.stops} stops</strong></div></div></article>)}</>}</section>{bundle&&<div className="modal-backdrop"><section className="modal-card bundle-confirmation" role="dialog" aria-modal="true"><button className="close-button" onClick={()=>setBundle(null)}>×</button><div className="success-mark">✓</div><p className="eyebrow">Bundle reserved</p><h2>Every stop is confirmed.</h2><div className="bundle-pickups">{bundle.reservations.map(item=><div key={item.reservationId}><strong>{item.title}</strong><span>{item.quantity} reserved · Code {item.pickupCode}</span><span>{item.pickupAddress||'Pickup address unavailable'}</span><span>{item.pickupLabel||'Pickup time unavailable'}</span></div>)}</div><button className="primary-action" onClick={()=>setBundle(null)}>Done</button></section></div>}</div>;
+  return <div className="planner"><section className="planner-hero"><button className="back-link" onClick={onBack}>← Back to food</button><p className="eyebrow">Smart ingredient rescue</p><h1>What could we<br/><em>cook tonight?</em></h1><p className="hero-description">We combine expiring ingredients from nearby kitchens, then keep the pickup route practical.</p></section><section className="planner-controls"><div><label>Maximum stops <strong>{maxStops}</strong></label><input type="range" min="1" max="3" value={maxStops} onChange={e=>setMaxStops(Number(e.target.value))}/><span><small>1 stop</small><small>3 stops</small></span></div><div><label>Maximum route <strong>{maxMiles} miles</strong></label><input type="range" min="1" max="5" value={maxMiles} onChange={e=>setMaxMiles(Number(e.target.value))}/><span><small>Nearby</small><small>5 miles</small></span></div><div className="planner-note">✦ Suggestions use only live ingredient listings within these limits.</div></section><section className="plans"><div className="section-heading"><div><p className="eyebrow">Meal planner</p><h2>{listings.length?`${listings.length} live ingredient listing${listings.length===1?'':'s'} available`:'Waiting for live ingredients'}</h2></div></div>{!listings.length?<div className="empty-plan"><strong>No ingredients are available yet.</strong><p>Publish ingredient listings from kitchen accounts to begin testing meal planning.</p></div>:<><div className="planner-launch"><div><strong>Choose a starting point</strong><p>Your location is used only by the short-lived planning job and is not saved with your recipes.</p></div><button className="primary-action" disabled={busy} onClick={()=>void generate(false)}>{busy?'Building plans…':'Use my location & generate'}</button><span>or</span><div className="zip-entry"><input aria-label="US ZIP code" inputMode="numeric" placeholder="ZIP code" value={postalCode} onChange={event=>setPostalCode(event.target.value)}/><button disabled={busy} onClick={()=>void generate(true)}>Generate with ZIP</button></div>{locationError&&<p className="planner-error" role="alert">{locationError}</p>}</div>{processing&&<div className="recipe-run-status" role="status"><span className="recipe-run-spinner"/><div><strong>{run?.status==='queued'?'Your recipe run is queued':'Planning recipes from live ingredients…'}</strong><p>You can leave this page and come back. We’ll keep the result for you.</p></div></div>}{run?.status==='succeeded'&&<p className="recipe-run-saved">✓ Recipe run completed and saved to your account.</p>}{explanation&&<p className="plan-explanation">{explanation}</p>}{plans.map((plan,index)=><article className="recipe-card live-recipe" key={`${plan.title}-${index}`}><div className="recipe-copy"><div className="recipe-rank">{String(index+1).padStart(2,'0')}</div><p className="eyebrow">Uses {plan.ingredients.length} live listing{plan.ingredients.length===1?'':'s'}</p><h2>{plan.title}</h2><div className="recipe-stats"><span><b>{plan.servings}</b> servings</span><span><b>{plan.stops}</b> pickup stops</span><span><b>{plan.estimated_route_miles}</b> route miles</span><span><b>{plan.instructions.length}</b> cooking steps</span></div><div className="ingredient-pills">{plan.ingredients.map(item=><span key={item.listing_id}>{item.quantity} {item.unit} {item.name}</span>)}</div>{plan.pantry_items.length>0&&<p><strong>From your pantry:</strong> {plan.pantry_items.join(', ')}</p>}<ol className="recipe-steps">{plan.instructions.map((step,stepIndex)=><li key={stepIndex}>{step}</li>)}</ol>{plan.safety_notes.length>0&&<div className="safety-notes"><strong>Food safety</strong>{plan.safety_notes.map((note,noteIndex)=><p key={noteIndex}>{note}</p>)}</div>}<button className="primary-action" disabled={Boolean(reserving)} onClick={()=>void reserveBundle(plan)}>{reserving===plan.title?'Reserving everything…':'Reserve all ingredients'}</button></div><div className="route-card"><p className="eyebrow">Pickup bundle</p><h3>One confirmation.<br/>All-or-nothing reservation.</h3>{plan.ingredients.map((item,itemIndex)=><div className="stop" key={item.listing_id}><b>{itemIndex+1}</b><div><strong>{item.name}</strong><small>{item.quantity} {item.unit} reserved if every stop is available</small></div></div>)}<div className="route-total"><span>Total route estimate</span><strong>{plan.estimated_route_miles} mi · {plan.stops} stops</strong></div></div></article>)}</>}</section>{bundle&&<div className="modal-backdrop"><section className="modal-card bundle-confirmation" role="dialog" aria-modal="true"><button className="close-button" onClick={()=>setBundle(null)}>×</button><div className="success-mark">✓</div><p className="eyebrow">Bundle reserved</p><h2>Every stop is confirmed.</h2><div className="bundle-pickups">{bundle.reservations.map(item=><div key={item.reservationId}><strong>{item.title}</strong><span>{item.quantity} reserved · Code {item.pickupCode}</span><span>{item.pickupAddress||'Pickup address unavailable'}</span><span>{item.pickupLabel||'Pickup time unavailable'}</span></div>)}</div><button className="primary-action" onClick={()=>setBundle(null)}>Done</button></section></div>}</div>;
 }
 
 function Impact({servings,onBack}:{servings:number;onBack:()=>void}){return <div className="impact-page"><button className="back-link" onClick={onBack}>← Back to food</button><section><p className="eyebrow">Charlotte network · Live data</p><h1>Small pickups.<br/><em>Real impact.</em></h1><div className="impact-grid"><div><strong>—</strong><span>servings collected · not tracked yet</span></div><div><strong>—</strong><span>ingredients rescued · not tracked yet</span></div><div><strong>—</strong><span>pickup completion · not tracked yet</span></div><div><strong>{servings}</strong><span>ready-to-eat meals available now</span></div></div></section></div>}

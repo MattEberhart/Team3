@@ -132,6 +132,34 @@ class RepositorySerializationTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertNotIn("completedBy", result)
 
+    def test_recipe_job_is_persisted_without_location(self):
+        written = []
+        repository = Repository.__new__(Repository)
+        repository.agent_runs = SimpleNamespace(put_item=lambda **kwargs: written.append(kwargs))
+
+        result = repository.create_recipe_job("recipient-1", max_stops=2, max_miles=3.5)
+
+        item = written[0]["Item"]
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(item["userRecipeId"], "recipient-1")
+        self.assertNotIn("latitude", item)
+        self.assertNotIn("longitude", item)
+
+    def test_recipe_job_lookup_is_scoped_to_its_user(self):
+        repository = Repository.__new__(Repository)
+        repository.agent_runs = SimpleNamespace(get_item=lambda **kwargs: {"Item": {
+            "runId": "run-1",
+            "userId": "recipient-1",
+            "kind": "recipe-planning",
+            "status": "succeeded",
+            "result": {"plans": [], "explanation": "Nothing nearby."},
+            "createdAt": "2026-10-03T12:00:00+00:00",
+            "updatedAt": "2026-10-03T12:01:00+00:00",
+        }})
+
+        self.assertIsNone(repository.get_recipe_job("recipient-2", "run-1"))
+        self.assertEqual(repository.get_recipe_job("recipient-1", "run-1")["status"], "succeeded")
+
 
 if __name__ == "__main__":
     unittest.main()

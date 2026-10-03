@@ -2,18 +2,20 @@ import base64
 import json
 import os
 import re
+import traceback
 import uuid
 
 import boto3
 from botocore.exceptions import ClientError
 
-from agent_runtime import extract_donation, plan_recipes
+from agent_runtime import extract_donation
 from repository import Repository
 
 
 repository = Repository()
 s3 = boto3.client("s3")
 places = boto3.client("geo-places")
+sqs = boto3.client("sqs")
 
 
 def response(status: int, body: dict | list):
@@ -161,10 +163,35 @@ def handler(event, _context):
             require_fields(data, "organizationId", "shiftNote")
             return response(200, extract_donation(repository, user_id=user_id, organization_id=data["organizationId"], shift_note=data["shiftNote"][:8000]))
 
+        if route_key == "GET /agent/recipes":
+            return response(200, {"items": repository.recipe_jobs_for_user(user_id)})
+
+        if route_key == "GET /agent/recipes/{runId}":
+            job = repository.get_recipe_job(user_id, event.get("pathParameters", {}).get("runId", ""))
+            return response(200, job) if job else response(404, {"error": "Recipe run not found."})
+
         if route_key == "POST /agent/recipes":
             data = body_from(event)
             latitude, longitude = recipe_origin(data)
-            return response(200, plan_recipes(repository, user_id=user_id, latitude=latitude, longitude=longitude, max_stops=min(max(int(data.get("maxStops", 2)), 1), 4), max_miles=min(max(float(data.get("maxMiles", 3)), 0.5), 10)))
+            max_stops = min(max(int(data.get("maxStops", 2)), 1), 4)
+            max_miles = min(max(float(data.get("maxMiles", 3)), 0.5), 10)
+            job = repository.create_recipe_job(user_id, max_stops=max_stops, max_miles=max_miles)
+            try:
+                sqs.send_message(
+                    QueueUrl=os.environ["RECIPE_JOBS_QUEUE_URL"],
+                    MessageBody=json.dumps({
+                        "runId": job["runId"],
+                        "userId": user_id,
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "maxStops": max_stops,
+                        "maxMiles": max_miles,
+                    }),
+                )
+            except Exception:
+                repository.fail_recipe_job(job["runId"], "Recipe planning could not be started. Please try again.")
+                raise
+            return response(202, job)
 
         return response(404, {"error": "Route not found."})
     except PermissionError as error:
@@ -184,5 +211,5 @@ def handler(event, _context):
         print(json.dumps({"event": "aws_error", "code": error_code}))
         return response(500, {"error": "A service error occurred."})
     except Exception as error:
-        print(json.dumps({"event": "unhandled_error", "type": type(error).__name__}))
+        print(json.dumps({"event": "unhandled_error", "type": type(error).__name__, "message": str(error), "traceback": traceback.format_exc()}))
         return response(500, {"error": "An unexpected error occurred."})

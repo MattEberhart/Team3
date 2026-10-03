@@ -104,6 +104,9 @@ Resources:
     Properties:
       CodeUri: ../backend/
       Handler: app.handler
+      Environment:
+        Variables:
+          RECIPE_JOBS_QUEUE_URL: !Ref RecipeJobsQueue
       Policies:
         - DynamoDBCrudPolicy: {TableName: !Ref UsersTable}
         - DynamoDBCrudPolicy: {TableName: !Ref OrganizationsTable}
@@ -111,6 +114,7 @@ Resources:
         - DynamoDBCrudPolicy: {TableName: !Ref ListingsTable}
         - DynamoDBCrudPolicy: {TableName: !Ref ReservationsTable}
         - DynamoDBCrudPolicy: {TableName: !Ref AgentRunsTable}
+        - SQSSendMessagePolicy: {QueueName: !GetAtt RecipeJobsQueue.QueueName}
         - S3CrudPolicy: {BucketName: !Ref MediaBucket}
         - Statement:
             Effect: Allow
@@ -177,6 +181,50 @@ Resources:
         Recipes:
           Type: HttpApi
           Properties: {ApiId: !Ref HttpApi, Path: /agent/recipes, Method: POST}
+        RecipeRuns:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: /agent/recipes, Method: GET}
+        RecipeRun:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: '/agent/recipes/{runId}', Method: GET}
+
+  RecipeWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/
+      Handler: recipe_worker.handler
+      Timeout: 180
+      Policies:
+        - DynamoDBReadPolicy: {TableName: !Ref ListingsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref AgentRunsTable}
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              - !Ref OpenAISecret
+              - !Ref LangSmithSecret
+      Events:
+        RecipeJobs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RecipeJobsQueue.Arn
+            BatchSize: 1
+
+  RecipeJobsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  RecipeJobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 86400
+      VisibilityTimeout: 1080
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RecipeJobsDeadLetterQueue.Arn
+        maxReceiveCount: 2
 
   UsersTable:
     Type: AWS::DynamoDB::Table
@@ -281,12 +329,18 @@ Resources:
       AttributeDefinitions:
         - {AttributeName: runId, AttributeType: S}
         - {AttributeName: organizationId, AttributeType: S}
+        - {AttributeName: userRecipeId, AttributeType: S}
         - {AttributeName: createdAt, AttributeType: S}
       KeySchema: [{AttributeName: runId, KeyType: HASH}]
       GlobalSecondaryIndexes:
         - IndexName: OrgCreatedIndex
           KeySchema:
             - {AttributeName: organizationId, KeyType: HASH}
+            - {AttributeName: createdAt, KeyType: RANGE}
+          Projection: {ProjectionType: ALL}
+        - IndexName: RecipeUserCreatedIndex
+          KeySchema:
+            - {AttributeName: userRecipeId, KeyType: HASH}
             - {AttributeName: createdAt, KeyType: RANGE}
           Projection: {ProjectionType: ALL}
       TimeToLiveSpecification: {AttributeName: expiresAt, Enabled: true}

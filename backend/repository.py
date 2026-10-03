@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
+from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
 
 
@@ -317,6 +318,109 @@ class Repository:
         }
         self.agent_runs.put_item(Item=self._ddb_safe(item))
         return json_safe(item)
+
+    def create_recipe_job(self, user_id: str, *, max_stops: int, max_miles: float) -> dict:
+        created_at = now_iso()
+        item = {
+            "runId": str(uuid.uuid4()),
+            "userId": user_id,
+            "userRecipeId": user_id,
+            "kind": "recipe-planning",
+            "status": "queued",
+            "maxStops": max_stops,
+            "maxMiles": Decimal(str(max_miles)),
+            "createdAt": created_at,
+            "updatedAt": created_at,
+            "expiresAt": int(time.time()) + 60 * 60 * 24 * 14,
+        }
+        self.agent_runs.put_item(
+            Item=item,
+            ConditionExpression="attribute_not_exists(runId)",
+        )
+        return self._public_recipe_job(item)
+
+    def get_recipe_job(self, user_id: str, run_id: str) -> dict | None:
+        item = self.agent_runs.get_item(
+            Key={"runId": run_id}, ConsistentRead=True
+        ).get("Item")
+        if not item or item.get("kind") != "recipe-planning" or item.get("userId") != user_id:
+            return None
+        return self._public_recipe_job(item)
+
+    def recipe_jobs_for_user(self, user_id: str, limit: int = 10) -> list[dict]:
+        result = self.agent_runs.query(
+            IndexName="RecipeUserCreatedIndex",
+            KeyConditionExpression=Key("userRecipeId").eq(user_id),
+            ScanIndexForward=False,
+            Limit=min(limit, 25),
+        )
+        return [self._public_recipe_job(item) for item in result.get("Items", [])]
+
+    def start_recipe_job(self, run_id: str) -> bool:
+        job = self.agent_runs.get_item(
+            Key={"runId": run_id}, ConsistentRead=True
+        ).get("Item")
+        if not job or job.get("kind") != "recipe-planning" or job.get("status") in {"succeeded", "failed"}:
+            return False
+        try:
+            self.agent_runs.update_item(
+                Key={"runId": run_id},
+                UpdateExpression="SET #status = :running, updatedAt = :updated_at REMOVE #error",
+                ConditionExpression="#status IN (:queued, :running)",
+                ExpressionAttributeNames={"#status": "status", "#error": "error"},
+                ExpressionAttributeValues={
+                    ":queued": "queued",
+                    ":running": "running",
+                    ":updated_at": now_iso(),
+                },
+            )
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
+
+    def complete_recipe_job(self, run_id: str, result: dict) -> None:
+        self.agent_runs.update_item(
+            Key={"runId": run_id},
+            UpdateExpression="SET #status = :succeeded, #result = :result, updatedAt = :updated_at REMOVE #error",
+            ExpressionAttributeNames={"#status": "status", "#result": "result", "#error": "error"},
+            ExpressionAttributeValues={
+                ":succeeded": "succeeded",
+                ":result": self._ddb_safe(result),
+                ":updated_at": now_iso(),
+            },
+        )
+
+    def fail_recipe_job(self, run_id: str, message: str) -> None:
+        self.agent_runs.update_item(
+            Key={"runId": run_id},
+            UpdateExpression="SET #status = :failed, #error = :error, updatedAt = :updated_at REMOVE #result",
+            ExpressionAttributeNames={"#status": "status", "#error": "error", "#result": "result"},
+            ExpressionAttributeValues={
+                ":failed": "failed",
+                ":error": message[:500],
+                ":updated_at": now_iso(),
+            },
+        )
+
+    @staticmethod
+    def _public_recipe_job(item: dict) -> dict:
+        safe = json_safe(item)
+        return {
+            key: safe[key]
+            for key in (
+                "runId",
+                "status",
+                "maxStops",
+                "maxMiles",
+                "createdAt",
+                "updatedAt",
+                "result",
+                "error",
+            )
+            if key in safe
+        }
 
     @staticmethod
     def _ddb_safe(value):
