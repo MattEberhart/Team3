@@ -150,7 +150,7 @@ class Repository:
                         "TableName": self.listings.name,
                         "Key": {"listingId": {"S": listing_id}},
                         "UpdateExpression": "SET quantityAvailable = quantityAvailable - :q, updatedAt = :now",
-                        "ConditionExpression": "#status = :available AND quantityAvailable >= :q",
+                        "ConditionExpression": "#status = :available AND pickupEnd >= :now AND quantityAvailable >= :q",
                         "ExpressionAttributeNames": {"#status": "status"},
                         "ExpressionAttributeValues": {
                             ":q": {"N": str(quantity_decimal)},
@@ -169,6 +169,68 @@ class Repository:
             ]
         )
         return json_safe({**item, "pickupAddress": listing.get("pickupAddress", ""), "pickupLabel": listing.get("pickupLabel", "")})
+
+    def create_bulk_reservation(self, user_id: str, requested_items: list[dict]) -> dict:
+        if not 1 <= len(requested_items) <= 4:
+            raise ValueError("A bundle must contain between one and four listings.")
+        listing_ids = [str(item.get("listingId", "")) for item in requested_items]
+        if len(set(listing_ids)) != len(listing_ids):
+            raise ValueError("A bundle cannot contain the same listing twice.")
+
+        bundle_id = str(uuid.uuid4())
+        created_at = now_iso()
+        reservations = []
+        transaction = []
+        for requested in requested_items:
+            listing_id = str(requested.get("listingId", ""))
+            quantity = Decimal(str(requested.get("quantity", 0)))
+            if not listing_id or quantity <= 0:
+                raise ValueError("Every bundle item requires a listing and positive quantity.")
+            listing = self.get_listing(listing_id)
+            if not listing:
+                raise ValueError("One of the requested listings no longer exists.")
+            reservation = {
+                "reservationId": str(uuid.uuid4()),
+                "bundleId": bundle_id,
+                "listingId": listing_id,
+                "recipientUserId": user_id,
+                "quantity": quantity,
+                "status": "reserved",
+                "pickupCode": f"{secrets.randbelow(10000):04d}",
+                "createdAt": created_at,
+            }
+            transaction.extend([
+                {
+                    "Update": {
+                        "TableName": self.listings.name,
+                        "Key": {"listingId": {"S": listing_id}},
+                        "UpdateExpression": "SET quantityAvailable = quantityAvailable - :q, updatedAt = :now",
+                        "ConditionExpression": "#status = :available AND pickupEnd >= :now AND quantityAvailable >= :q",
+                        "ExpressionAttributeNames": {"#status": "status"},
+                        "ExpressionAttributeValues": {
+                            ":q": {"N": str(quantity)},
+                            ":available": {"S": "available"},
+                            ":now": {"S": created_at},
+                        },
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": self.reservations.name,
+                        "Item": {key: self._serialize(value) for key, value in reservation.items()},
+                        "ConditionExpression": "attribute_not_exists(reservationId)",
+                    }
+                },
+            ])
+            reservations.append(json_safe({
+                **reservation,
+                "title": listing.get("title", "Ingredient"),
+                "pickupAddress": listing.get("pickupAddress", ""),
+                "pickupLabel": listing.get("pickupLabel", ""),
+            }))
+
+        self.client.transact_write_items(TransactItems=transaction)
+        return {"bundleId": bundle_id, "reservations": reservations}
 
     def reservations_for_user(self, user_id: str, limit: int = 50) -> list[dict]:
         result = self.reservations.query(

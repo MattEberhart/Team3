@@ -24,6 +24,7 @@ class ModelTests(unittest.TestCase):
                 title="Vegetable soup",
                 servings=10,
                 instructions=["Cook safely"],
+                ingredients=[{"listing_id": "one", "name": "Carrots", "quantity": 2, "unit": "lb"}],
                 listing_ids=["one"],
                 stops=1,
                 estimated_route_miles=-1,

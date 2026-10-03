@@ -118,6 +118,10 @@ Resources:
             Resource:
               - !Ref OpenAISecret
               - !Ref LangSmithSecret
+        - Statement:
+            Effect: Allow
+            Action: geo-places:Geocode
+            Resource: '*'
       Events:
         Health:
           Type: HttpApi
@@ -146,6 +150,9 @@ Resources:
         Reserve:
           Type: HttpApi
           Properties: {ApiId: !Ref HttpApi, Path: /reservations, Method: POST}
+        ReserveBundle:
+          Type: HttpApi
+          Properties: {ApiId: !Ref HttpApi, Path: /reservations/bulk, Method: POST}
         MyReservations:
           Type: HttpApi
           Properties: {ApiId: !Ref HttpApi, Path: /me/reservations, Method: GET}

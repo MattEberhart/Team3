@@ -123,7 +123,11 @@ def plan_recipes(repository, *, user_id: str, latitude: float, longitude: float,
     @tool
     def find_available_ingredients() -> list[dict]:
         """Return currently available public food listings; results are already access-scoped."""
-        return [{key: value for key, value in item.items() if key not in {"pickupAddress", "latitude", "longitude", "createdBy"}} for item in repository.list_available(50)]
+        return [
+            {key: value for key, value in item.items() if key not in {"pickupAddress", "latitude", "longitude", "createdBy"}}
+            for item in repository.list_available(50)
+            if item.get("category") == "ingredient" and float(item.get("quantityAvailable", 0)) > 0
+        ]
 
     @tool
     def estimate_pickup_route(listing_ids: list[str]) -> dict:
@@ -150,7 +154,9 @@ def plan_recipes(repository, *, user_id: str, latitude: float, longitude: float,
         response_format=RecipeResult,
         instructions=(
             "Suggest practical food-rescue recipes using only available listings. Every plan must "
-            "call estimate_pickup_route and must obey the supplied stop and mileage limits. Do not "
+            "include the exact quantity and unit needed from every listing in ingredients, copy each "
+            "listing ID into listing_ids, call estimate_pickup_route, and obey the supplied stop and "
+            "mileage limits. Never request more than the listing's available quantity. Do not "
             "reserve inventory. Prefer urgently expiring food. Be conservative about food safety, "
             "allergens, and missing data; include warnings rather than guessing."
         ),
@@ -170,8 +176,22 @@ def plan_recipes(repository, *, user_id: str, latitude: float, longitude: float,
     payload = structured.model_dump(mode="json")
     safe_plans = []
     for plan in payload["plans"]:
-        route = estimate_pickup_route.invoke({"listing_ids": plan["listing_ids"]})
-        if route["withinLimit"] and route["stops"] <= max_stops:
+        ingredient_ids = list(dict.fromkeys(item["listing_id"] for item in plan["ingredients"]))
+        if not ingredient_ids or len(ingredient_ids) != len(plan["ingredients"]) or len(ingredient_ids) > max_stops:
+            continue
+        valid_quantities = True
+        for ingredient in plan["ingredients"]:
+            listing = repository.get_listing(ingredient["listing_id"]) or {}
+            if (
+                listing.get("status") != "available"
+                or listing.get("category") != "ingredient"
+                or ingredient["unit"] != listing.get("unit")
+                or float(ingredient["quantity"]) > float(listing.get("quantityAvailable", 0))
+            ):
+                valid_quantities = False
+                break
+        route = estimate_pickup_route.invoke({"listing_ids": ingredient_ids})
+        if valid_quantities and route["withinLimit"] and route["stops"] <= max_stops and set(route["listingIds"]) == set(ingredient_ids):
             plan.update({"listing_ids": route["listingIds"], "stops": route["stops"], "estimated_route_miles": route["estimatedMiles"]})
             safe_plans.append(plan)
     payload["plans"] = safe_plans

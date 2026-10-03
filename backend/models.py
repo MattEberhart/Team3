@@ -24,10 +24,18 @@ class ExtractionResult(BaseModel):
     follow_up_questions: list[str] = Field(default_factory=list)
 
 
+class RecipeIngredient(BaseModel):
+    listing_id: str
+    name: str
+    quantity: float = Field(gt=0)
+    unit: Literal["meals", "boxes", "lb", "kg", "items", "trays"]
+
+
 class RecipePlan(BaseModel):
     title: str
     servings: int = Field(gt=0)
     instructions: list[str]
+    ingredients: list[RecipeIngredient] = Field(min_length=1)
     listing_ids: list[str]
     pantry_items: list[str] = Field(default_factory=list)
     stops: int = Field(gt=0)

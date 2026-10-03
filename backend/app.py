@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import uuid
 
 import boto3
@@ -12,6 +13,7 @@ from repository import Repository
 
 repository = Repository()
 s3 = boto3.client("s3")
+places = boto3.client("geo-places")
 
 
 def response(status: int, body: dict | list):
@@ -51,6 +53,32 @@ def public_listing(item: dict) -> dict:
     return {key: value for key, value in item.items() if key not in {"pickupAddress", "latitude", "longitude", "createdBy"}}
 
 
+def geocode(query: str, *, store: bool = False) -> tuple[float, float]:
+    result = places.geocode(
+        QueryText=query[:200],
+        Filter={"IncludeCountries": ["USA"]},
+        MaxResults=1,
+        IntendedUse="Storage" if store else "SingleUse",
+    )
+    items = result.get("ResultItems", [])
+    if not items or len(items[0].get("Position", [])) != 2:
+        raise ValueError("We could not find that location.")
+    longitude, latitude = items[0]["Position"]
+    return float(latitude), float(longitude)
+
+
+def recipe_origin(data: dict) -> tuple[float, float]:
+    if data.get("latitude") not in (None, "") and data.get("longitude") not in (None, ""):
+        latitude, longitude = float(data["latitude"]), float(data["longitude"])
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise ValueError("Location coordinates are invalid.")
+        return latitude, longitude
+    postal_code = str(data.get("postalCode", "")).strip()
+    if not re.fullmatch(r"\d{5}(?:-\d{4})?", postal_code):
+        raise ValueError("Enter a valid US ZIP code.")
+    return geocode(f"{postal_code}, USA")
+
+
 def handler(event, _context):
     method = event.get("requestContext", {}).get("http", {}).get("method", "")
     path = event.get("rawPath", "")
@@ -77,6 +105,8 @@ def handler(event, _context):
             require_fields(data, "displayName", "accountType")
             if data["accountType"] not in {"recipient", "donor"}:
                 raise ValueError("Account type must be recipient or donor.")
+            if data["accountType"] == "donor" and data.get("address") and (data.get("latitude") in (None, "") or data.get("longitude") in (None, "")):
+                data["latitude"], data["longitude"] = geocode(data["address"], store=True)
             claims = claims_from(event)
             return response(201, repository.bootstrap_user(user_id, claims.get("email", ""), data["displayName"], data["accountType"], data.get("organizationName"), data.get("address"), data.get("latitude"), data.get("longitude")))
 
@@ -93,6 +123,13 @@ def handler(event, _context):
             if quantity <= 0:
                 raise ValueError("Quantity must be greater than zero.")
             return response(201, repository.create_reservation(user_id, data["listingId"], quantity))
+
+        if route_key == "POST /reservations/bulk":
+            data = body_from(event)
+            items = data.get("items")
+            if not isinstance(items, list):
+                raise ValueError("Bundle items are required.")
+            return response(201, repository.create_bulk_reservation(user_id, items))
 
         if route_key == "GET /me/reservations":
             return response(200, {"items": repository.reservations_for_user(user_id)})
@@ -118,8 +155,8 @@ def handler(event, _context):
 
         if route_key == "POST /agent/recipes":
             data = body_from(event)
-            require_fields(data, "latitude", "longitude")
-            return response(200, plan_recipes(repository, user_id=user_id, latitude=float(data["latitude"]), longitude=float(data["longitude"]), max_stops=min(max(int(data.get("maxStops", 2)), 1), 4), max_miles=min(max(float(data.get("maxMiles", 3)), 0.5), 10)))
+            latitude, longitude = recipe_origin(data)
+            return response(200, plan_recipes(repository, user_id=user_id, latitude=latitude, longitude=longitude, max_stops=min(max(int(data.get("maxStops", 2)), 1), 4), max_miles=min(max(float(data.get("maxMiles", 3)), 0.5), 10)))
 
         return response(404, {"error": "Route not found."})
     except PermissionError as error:
@@ -128,8 +165,8 @@ def handler(event, _context):
         return response(400, {"error": str(error)})
     except ClientError as error:
         error_code = error.response.get("Error", {}).get("Code")
-        if route_key == "POST /reservations" and error_code in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
-            return response(409, {"error": "That quantity is no longer available."})
+        if route_key in {"POST /reservations", "POST /reservations/bulk"} and error_code in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
+            return response(409, {"error": "Some of that food is no longer available. Nothing was reserved."})
         if route_key == "POST /me/bootstrap" and error_code in {"ConditionalCheckFailedException", "TransactionCanceledException"}:
             return response(409, {"error": "We could not finish setting up this profile. Please sign out, sign back in, and try again."})
         print(json.dumps({"event": "aws_error", "code": error_code}))

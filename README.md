@@ -19,7 +19,8 @@ Second Serving is a local surplus-food marketplace built by Team 3. Kitchens des
 1. Browse available meals and ingredients without creating an account.
 2. Sign in when ready to reserve.
 3. Choose a quantity and receive the exact pickup address and pickup code.
-4. Use the ingredient-planning experience to find recipes constrained by maximum stops and route distance.
+4. Generate ingredient plans from their current location or a ZIP code, constrained by maximum stops and route distance.
+5. Reserve every ingredient in a selected plan with one all-or-nothing transaction.
 
 ### End-to-end test flow
 
@@ -38,6 +39,7 @@ The development environment starts without seeded food or manufactured activity.
 - API Gateway HTTP API with a Cognito JWT authorizer
 - Python 3.12 Lambda API
 - DynamoDB on-demand tables for users, organizations, memberships, listings, reservations, and short-lived agent drafts
+- Amazon Location Places for server-side ZIP and donor-address geocoding
 - Private S3 bucket with presigned uploads for photos and temporary voice clips
 - OpenAI through LangChain Deep Agents, with LangSmith tracing; both API keys live in AWS Secrets Manager
 - AWS SAM/CloudFormation for repeatable infrastructure
@@ -101,6 +103,8 @@ The development database is intentionally unseeded. Listings, reservations, and 
 | AgentRuns | Short-lived AI drafts and audit context, removed automatically after 14 days. |
 
 Reservations use one DynamoDB transaction: a conditional inventory decrement and reservation insert either both succeed or both fail. This prevents two recipients from claiming the same final quantity.
+
+Meal-plan bundles use the same pattern across every selected listing. All inventory decrements and reservation records commit in one DynamoDB transaction, so a recipient receives the complete ingredient bundle or nothing is reserved.
 
 The transaction path uses DynamoDB's low-level client and explicit `AttributeValue` serialization. Resource-style clients must not be substituted there because doing so would serialize transaction keys twice.
 
@@ -184,13 +188,15 @@ Traces include model and tool inputs and outputs. Treat the LangSmith workspace 
 - Account: `GET /me`, `POST /me/bootstrap`
 - Recipient: `POST /reservations`, `GET /me/reservations`
 - Donor: `POST /listings`, `POST /uploads`, `POST /agent/extract`
-- Planning: `POST /agent/recipes`
+- Planning: `POST /agent/recipes` using browser coordinates or a US ZIP code
+- Atomic plan reservation: `POST /reservations/bulk`
 
 Reservations use a DynamoDB transaction with a conditional inventory decrement, so two recipients cannot successfully reserve the same final quantity.
 
 ## Privacy and security notes
 
 - Exact pickup addresses and coordinates are stripped from public listing responses.
+- Recipient browser coordinates and ZIP geocoding results are used for the current planning request and are not stored.
 - Pickup details are returned only after a successful authenticated reservation.
 - Uploads use five-minute presigned S3 URLs and an allowlist of image/audio content types.
 - Temporary voice objects expire from S3 after one day.
