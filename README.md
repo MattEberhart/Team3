@@ -154,22 +154,24 @@ PYTHONPATH=backend .venv/bin/python -m unittest discover -s backend/tests
 npm audit --omit=dev
 ```
 
-## Deploy
+## Deploy and tear down with GitHub Actions
 
-Use an IAM Identity Center or least-privilege administrative role—not AWS account root—then run:
+The `Deploy to AWS` GitHub Actions workflow owns deployment; no local deployment command is needed. It deploys the SAM/CloudFormation stack, builds the frontend with the stack outputs, and uploads the static site to Amplify.
 
-```bash
-sam deploy --config-file infra/samconfig.toml --guided
-```
+Add the AWS credentials at **GitHub repository → Settings → Secrets and variables → Actions → Secrets → New repository secret**:
 
-After deployment:
+| Secret | Value |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID` | Access key ID for the deployment IAM user or role credentials. |
+| `AWS_SECRET_ACCESS_KEY` | Matching secret access key. |
 
-1. Open AWS Secrets Manager and replace the `apiKey` placeholders in `/second-serving/dev/openai` and `/second-serving/dev/langsmith`.
-2. Read the stack outputs for the API URL, Cognito IDs, and Amplify app ID.
-3. Set those three `NEXT_PUBLIC_*` values locally and rebuild `out/`, or connect the Amplify app to this repository and enable automatic builds.
-4. Update the stack's `FrontendOrigin` and `SiteUrl` parameters to the final Amplify origin so CORS and social metadata use the deployed site.
+Use credentials from a dedicated, non-root AWS identity. The identity must be able to manage this stack's CloudFormation, IAM, Lambda, API Gateway, Cognito, DynamoDB, S3, SQS, Secrets Manager, Amplify, CloudWatch Logs, and X-Ray resources. Because this is a disposable hackathon account, `AdministratorAccess` is the simplest option; a scoped deployment policy is safer for a shared account.
 
-The CloudFormation template retains DynamoDB tables, the media bucket, Cognito pool, and API-key secrets when the stack is deleted. That protects hackathon data but means cleanup is intentionally a separate, explicit step.
+Deployment runs automatically when changes reach `main`. To run it manually, open **GitHub repository → Actions → Deploy to AWS → Run workflow**, leave `operation` set to `deploy`, and run it.
+
+After the first deployment, open AWS Secrets Manager and replace the `apiKey` placeholders in `/second-serving/dev/openai` and `/second-serving/dev/langsmith`. These are application API keys stored in AWS, not GitHub Actions secrets.
+
+To permanently remove the project, open **Run workflow**, set `operation` to `teardown`, enter `DELETE second-serving-dev` in the confirmation field, and run it. Teardown removes Lambda logs, empties the uploads bucket, and deletes the entire CloudFormation stack, including DynamoDB data, Cognito users, application secrets, API resources, and the Amplify app. This cannot be undone.
 
 ### OpenAI secret format
 
@@ -213,7 +215,7 @@ Reservations use a DynamoDB transaction with a conditional inventory decrement, 
 - Uploads use five-minute presigned S3 URLs and an allowlist of image/audio content types.
 - Temporary voice objects expire from S3 after one day.
 - DynamoDB uses encryption at rest and point-in-time recovery.
-- Data resources and the Cognito pool use retain policies to prevent accidental stack deletion from destroying hackathon data.
+- The GitHub Actions teardown path permanently deletes data resources, uploads, application secrets, and the Cognito pool after an exact confirmation phrase.
 - API CORS is restricted to the deployed Amplify origin.
 
 ## MVP limitations and next steps

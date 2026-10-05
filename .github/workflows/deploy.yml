@@ -1,0 +1,309 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Choose deploy or permanently delete the AWS stack
+        required: true
+        type: choice
+        options:
+          - deploy
+          - teardown
+        default: deploy
+      teardown_confirmation:
+        description: For teardown, type DELETE second-serving-dev
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: second-serving-aws
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: second-serving-dev
+  ENVIRONMENT: dev
+  OPENAI_MODEL: gpt-5.5
+
+jobs:
+  deploy:
+    if: github.event_name == 'push' || inputs.operation == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up AWS SAM
+        uses: aws-actions/setup-sam@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build serverless application
+        run: sam build --template-file infra/template.yaml
+
+      - name: Deploy AWS infrastructure
+        shell: bash
+        run: |
+          set -euo pipefail
+          site_url="http://localhost:3000"
+          if aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            amplify_domain="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[?OutputKey=='AmplifyDefaultDomain'].OutputValue" \
+              --output text)"
+            site_url="https://main.${amplify_domain}"
+          fi
+
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --resolve-s3 \
+            --s3-prefix "$STACK_NAME" \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "Environment=$ENVIRONMENT" \
+              "OpenAIModel=$OPENAI_MODEL" \
+              "FrontendOrigin=$site_url" \
+              "SiteUrl=$site_url"
+
+          if [[ "$site_url" == "http://localhost:3000" ]]; then
+            amplify_domain="$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[?OutputKey=='AmplifyDefaultDomain'].OutputValue" \
+              --output text)"
+            site_url="https://main.${amplify_domain}"
+
+            sam deploy \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --resolve-s3 \
+              --s3-prefix "$STACK_NAME" \
+              --capabilities CAPABILITY_IAM \
+              --no-confirm-changeset \
+              --no-fail-on-empty-changeset \
+              --parameter-overrides \
+                "Environment=$ENVIRONMENT" \
+                "OpenAIModel=$OPENAI_MODEL" \
+                "FrontendOrigin=$site_url" \
+                "SiteUrl=$site_url"
+          fi
+
+      - name: Read deployed frontend configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+
+          amplify_domain="$(output AmplifyDefaultDomain)"
+          {
+            echo "NEXT_PUBLIC_AWS_REGION=$AWS_REGION"
+            echo "NEXT_PUBLIC_COGNITO_USER_POOL_ID=$(output UserPoolId)"
+            echo "NEXT_PUBLIC_COGNITO_CLIENT_ID=$(output UserPoolClientId)"
+            echo "NEXT_PUBLIC_API_URL=$(output ApiUrl)"
+            echo "NEXT_PUBLIC_SITE_URL=https://main.${amplify_domain}"
+            echo "AMPLIFY_APP_ID=$(output AmplifyAppId)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Deploy frontend to Amplify
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/frontend.zip"
+          cd out
+          zip -qr "$archive" .
+
+          deployment="$(aws amplify create-deployment \
+            --app-id "$AMPLIFY_APP_ID" \
+            --branch-name main \
+            --region "$AWS_REGION" \
+            --output json)"
+          job_id="$(jq -r '.jobId' <<< "$deployment")"
+          upload_url="$(jq -r '.zipUploadUrl' <<< "$deployment")"
+
+          curl --fail --silent --show-error \
+            -H 'Content-Type: application/zip' \
+            --upload-file "$archive" \
+            "$upload_url"
+
+          aws amplify start-deployment \
+            --app-id "$AMPLIFY_APP_ID" \
+            --branch-name main \
+            --job-id "$job_id" \
+            --region "$AWS_REGION"
+
+          for attempt in {1..60}; do
+            status="$(aws amplify get-job \
+              --app-id "$AMPLIFY_APP_ID" \
+              --branch-name main \
+              --job-id "$job_id" \
+              --region "$AWS_REGION" \
+              --query 'job.summary.status' \
+              --output text)"
+            case "$status" in
+              SUCCEED)
+                echo "Frontend deployed to $NEXT_PUBLIC_SITE_URL"
+                exit 0
+                ;;
+              FAILED|CANCELLED)
+                echo "Amplify deployment ended with status: $status" >&2
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+
+          echo "Timed out waiting for the Amplify deployment." >&2
+          exit 1
+
+  teardown:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'teardown'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require exact teardown confirmation
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.teardown_confirmation }}
+        run: |
+          if [[ "$CONFIRMATION" != "DELETE $STACK_NAME" ]]; then
+            echo "Teardown refused. Enter exactly: DELETE $STACK_NAME" >&2
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up AWS SAM
+        uses: aws-actions/setup-sam@v2
+
+      - name: Inspect the stack
+        id: stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "Stack $STACK_NAME does not exist; nothing to delete."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          amplify_domain="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='AmplifyDefaultDomain'].OutputValue" \
+            --output text)"
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "site_url=https://main.${amplify_domain}" >> "$GITHUB_OUTPUT"
+
+      - name: Build serverless application
+        if: steps.stack.outputs.exists == 'true'
+        run: sam build --template-file infra/template.yaml
+
+      - name: Disable resource retention
+        if: steps.stack.outputs.exists == 'true'
+        shell: bash
+        env:
+          SITE_URL: ${{ steps.stack.outputs.site_url }}
+        run: |
+          set -euo pipefail
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --resolve-s3 \
+            --s3-prefix "$STACK_NAME" \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "Environment=$ENVIRONMENT" \
+              "OpenAIModel=$OPENAI_MODEL" \
+              "FrontendOrigin=$SITE_URL" \
+              "SiteUrl=$SITE_URL"
+
+      - name: Remove data, logs, uploads, and secrets
+        if: steps.stack.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          output() {
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+
+          bucket="$(output MediaBucketName)"
+          if [[ -n "$bucket" && "$bucket" != "None" ]]; then
+            aws s3 rm "s3://$bucket" --recursive
+          fi
+
+          for logical_id in ApiFunction RecipeWorkerFunction; do
+            function_name="$(aws cloudformation describe-stack-resource \
+              --stack-name "$STACK_NAME" \
+              --logical-resource-id "$logical_id" \
+              --region "$AWS_REGION" \
+              --query 'StackResourceDetail.PhysicalResourceId' \
+              --output text)"
+            aws logs delete-log-group \
+              --log-group-name "/aws/lambda/$function_name" \
+              --region "$AWS_REGION" 2>/dev/null || true
+          done
+
+          aws secretsmanager delete-secret \
+            --secret-id "$(output OpenAISecretArn)" \
+            --force-delete-without-recovery \
+            --region "$AWS_REGION"
+          aws secretsmanager delete-secret \
+            --secret-id "$(output LangSmithSecretArn)" \
+            --force-delete-without-recovery \
+            --region "$AWS_REGION"
+
+      - name: Delete all stack resources
+        if: steps.stack.outputs.exists == 'true'
+        run: sam delete --stack-name "$STACK_NAME" --region "$AWS_REGION" --no-prompts

@@ -47,7 +47,7 @@ Resources:
       UserPoolName: !Sub second-serving-${Environment}
       UsernameAttributes: [email]
       AutoVerifiedAttributes: [email]
-      DeletionProtection: ACTIVE
+      DeletionProtection: INACTIVE
       Policies:
         PasswordPolicy:
           MinimumLength: 10
@@ -228,8 +228,6 @@ Resources:
 
   UsersTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions: [{AttributeName: userId, AttributeType: S}]
@@ -239,8 +237,6 @@ Resources:
 
   OrganizationsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions: [{AttributeName: organizationId, AttributeType: S}]
@@ -250,8 +246,6 @@ Resources:
 
   MembershipsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -269,8 +263,6 @@ Resources:
 
   ListingsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -296,8 +288,6 @@ Resources:
 
   ReservationsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -322,8 +312,6 @@ Resources:
 
   AgentRunsTable:
     Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
@@ -349,8 +337,6 @@ Resources:
 
   MediaBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -375,8 +361,6 @@ Resources:
 
   OpenAISecret:
     Type: AWS::SecretsManager::Secret
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       Name: !Sub /second-serving/${Environment}/openai
       Description: OpenAI API key; populate the apiKey field after deployment.
@@ -384,8 +368,6 @@ Resources:
 
   LangSmithSecret:
     Type: AWS::SecretsManager::Secret
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       Name: !Sub /second-serving/${Environment}/langsmith
       Description: LangSmith API key for agent tracing; populate the apiKey field after deployment.
